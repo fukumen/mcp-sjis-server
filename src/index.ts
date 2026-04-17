@@ -16,10 +16,36 @@ import {
 } from "./charset-detector.js";
 import * as iconv from "iconv-lite";
 
+class Mutex {
+  private queue: Promise<void> = Promise.resolve();
+
+  async acquire(): Promise<() => void> {
+    let release!: () => void;
+    const next = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const previous = this.queue;
+    this.queue = this.queue.then(() => next);
+    await previous;
+    return release;
+  }
+}
+
+const fileMutexes = new Map<string, Mutex>();
+
+function getFileMutex(filePath: string): Mutex {
+  let mutex = fileMutexes.get(filePath);
+  if (!mutex) {
+    mutex = new Mutex();
+    fileMutexes.set(filePath, mutex);
+  }
+  return mutex;
+}
+
 const server = new Server(
   {
     name: "sjis-tools",
-    version: "1.0.0",
+    version: "1.0.1",
   },
   {
     capabilities: {
@@ -96,6 +122,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const filePath = args.path ? String(args.path) : "";
   const resolvedPath = filePath ? (isAbsolute(filePath) ? filePath : join(process.cwd(), filePath)) : "";
+
+  let release: (() => void) | undefined;
+  if (resolvedPath && (name === "sjis_read" || name === "sjis_write" || name === "sjis_edit")) {
+    const mutex = getFileMutex(resolvedPath);
+    release = await mutex.acquire();
+  }
 
   try {
     switch (name) {
@@ -280,6 +312,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       content: [{ type: "text", text: `Error: ${error.message}` }],
       isError: true,
     };
+  } finally {
+    if (release) release();
   }
 });
 
