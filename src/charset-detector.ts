@@ -16,51 +16,34 @@ export async function detectCharset(
     ? filePath
     : join(worktree || process.cwd(), filePath);
 
-  let currentDir = dirname(resolvedPath);
-  const worktreeRoot = worktree || "/";
+  try {
+    const config = await parse(resolvedPath);
+    const charsetValue = config.charset;
+    if (typeof charsetValue === "string") {
+      const charset = charsetValue.toLowerCase();
 
-  while (true) {
-    const editorconfigPath = join(currentDir, ".editorconfig");
+      if (
+        charset === "shift-jis" ||
+        charset === "sjis" ||
+        charset === "shift_jis" ||
+        charset === "cp932" ||
+        charset === "windows-932"
+      ) {
+        return { charset: "shift-jis", source: "editorconfig" };
+      }
 
-    if (existsSync(editorconfigPath)) {
-      try {
-        const config = await parse(editorconfigPath);
-        const charsetValue = config.charset;
-        if (typeof charsetValue === "string") {
-          const charset = charsetValue.toLowerCase();
-
-          if (
-            charset === "shift-jis" ||
-            charset === "sjis" ||
-            charset === "shift_jis" ||
-            charset === "cp932" ||
-            charset === "windows-932"
-          ) {
-            return { charset: "shift-jis", source: "editorconfig" };
-          }
-
-          if (
-            charset === "utf-8" ||
-            charset === "utf8" ||
-            charset === "utf-8-bom" ||
-            charset === "utf-16be" ||
-            charset === "utf-16le"
-          ) {
-            return { charset: "utf-8", source: "editorconfig" };
-          }
-        }
-      } catch {
-        // continue to detection
+      if (
+        charset === "utf-8" ||
+        charset === "utf8" ||
+        charset === "utf-8-bom" ||
+        charset === "utf-16be" ||
+        charset === "utf-16le"
+      ) {
+        return { charset: "utf-8", source: "editorconfig" };
       }
     }
-
-    if (currentDir === worktreeRoot || currentDir === "/" || currentDir === ".") {
-      break;
-    }
-
-    const parentDir = dirname(currentDir);
-    if (parentDir === currentDir) break;
-    currentDir = parentDir;
+  } catch {
+    // continue to detection
   }
 
   return { charset: "unknown", source: "detection" };
