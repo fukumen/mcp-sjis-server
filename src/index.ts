@@ -91,6 +91,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             path: { type: "string", description: "ファイルパス" },
             oldText: { type: "string", description: "置換前の文字列 (UTF-8)" },
             newText: { type: "string", description: "置換後の文字列 (UTF-8)" },
+            replaceAll: { type: "boolean", description: "trueの場合、ファイル内のすべての一致箇所を置換します（デフォルト: false）" },
           },
           required: ["path", "oldText", "newText"],
         },
@@ -138,44 +139,95 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
+        
+        try {
+          const stat = statSync(resolvedPath);
+          if (stat.isDirectory()) {
+            return {
+              content: [{ type: "text", text: `Error: ${resolvedPath} is a directory, not a file.` }],
+              isError: true,
+            };
+          }
+        } catch (e: any) {
+          return { content: [{ type: "text", text: `Error reading file stats: ${e.message}` }], isError: true };
+        }
+
         const buffer = readFileSync(resolvedPath);
         const charsetInfo = await detectCharset(resolvedPath);
-        let content = readFileWithCharset(buffer, charsetInfo.charset);
+        const rawContent = readFileWithCharset(buffer, charsetInfo.charset);
+        const allLines = rawContent.split('\n');
+        const totalLines = allLines.length;
 
-        const startLine = args.startLine !== undefined ? Number(args.startLine) : undefined;
-        const endLine = args.endLine !== undefined ? Number(args.endLine) : undefined;
+        const MAX_READ_LIMIT = 2000;
+        const MAX_LINE_LENGTH = 2000;
 
-        if (startLine !== undefined || endLine !== undefined) {
-          const lines = content.split('\n');
-          const start = startLine !== undefined && !isNaN(startLine) ? Math.max(1, startLine) - 1 : 0;
-          const end = endLine !== undefined && !isNaN(endLine) ? Math.min(lines.length, endLine) : lines.length;
-          content = lines.slice(start, end).join('\n');
+        let start = args.startLine !== undefined && !isNaN(Number(args.startLine)) ? Math.max(1, Number(args.startLine)) : 1;
+        let end = args.endLine !== undefined && !isNaN(Number(args.endLine)) ? Math.min(totalLines, Number(args.endLine)) : totalLines;
+
+        if (start > totalLines) {
+           return {
+             content: [{ type: "text", text: `Error: startLine (${start}) exceeds total lines (${totalLines}).` }],
+             isError: true,
+           };
+        }
+
+        // Limit the number of lines read to MAX_READ_LIMIT
+        if (end - start + 1 > MAX_READ_LIMIT) {
+          end = start + MAX_READ_LIMIT - 1;
+        }
+
+        const outputLines: string[] = [];
+        outputLines.push(`--- File: ${resolvedPath} (Charset: ${charsetInfo.charset}) ---`);
+        outputLines.push(`--- Showing lines ${start} to ${end} of ${totalLines} ---`);
+        
+        for (let i = start - 1; i < end; i++) {
+          let line = allLines[i];
+          // Strip carriage return if present
+          if (line.endsWith('\r')) line = line.slice(0, -1);
+          
+          if (line.length > MAX_LINE_LENGTH) {
+            line = line.substring(0, MAX_LINE_LENGTH) + " ... (line truncated to 2000 chars)";
+          }
+          outputLines.push(`${i + 1}: ${line}`);
+        }
+
+        if (end < totalLines) {
+          outputLines.push(`\n... (Showing lines ${start}-${end} of ${totalLines}. Use startLine=${end + 1} to continue reading.)`);
         }
 
         return {
-          content: [{ type: "text", text: content }],
+          content: [{ type: "text", text: outputLines.join('\n') }],
         };
       }
 
       case "sjis_write": {
         const contentToWrite = String(args.content);
+        const fileExists = existsSync(resolvedPath);
         const charsetInfo = await detectCharset(resolvedPath);
         const charset = charsetInfo.charset === "unknown" ? "shift-jis" : charsetInfo.charset;
         const buffer = encodeContent(contentToWrite, charset as any);
         writeFileSync(resolvedPath, buffer);
+        const action = fileExists ? "Overwrote existing file" : "Created new file";
         return {
-          content: [{ type: "text", text: `Successfully wrote to ${resolvedPath} in ${charset}` }],
+          content: [{ type: "text", text: `Successfully wrote to ${resolvedPath} in ${charset} (${action})` }],
         };
       }
 
       case "sjis_edit": {
         const oldText = String(args.oldText);
         const newText = String(args.newText);
+        const replaceAll = args.replaceAll === true;
 
         if (!existsSync(resolvedPath)) {
           return {
             content: [{ type: "text", text: `Error: File not found: ${resolvedPath}` }],
             isError: true,
+          };
+        }
+
+        if (oldText === newText) {
+          return {
+            content: [{ type: "text", text: "Warning: oldText and newText are identical. No changes made." }],
           };
         }
 
@@ -192,15 +244,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           originalContent = originalBuffer.toString("utf-8");
         }
 
-        if (!originalContent.includes(oldText)) {
+        const normalizedContent = originalContent.replace(/\r\n/g, '\n');
+        const normalizedOldText = oldText.replace(/\r\n/g, '\n');
+
+        if (!normalizedContent.includes(normalizedOldText)) {
           return {
             content: [{ type: "text", text: `Error: Could not find target text in file.` }],
             isError: true,
           };
         }
 
-        const newContent = originalContent.replace(oldText, newText);
-        const newBuffer = encodeContent(newContent, actualCharset as any);
+        const matchCount = normalizedContent.split(normalizedOldText).length - 1;
+
+        if (!replaceAll && matchCount > 1) {
+          return {
+            content: [{ type: "text", text: `Error: Found ${matchCount} matches for the target text. Set 'replaceAll: true' to replace all, or provide more context in 'oldText' to match only one instance.` }],
+            isError: true,
+          };
+        }
+
+        const newContent = replaceAll
+          ? normalizedContent.split(normalizedOldText).join(newText)
+          : normalizedContent.replace(normalizedOldText, newText);
+
+        const isCRLF = originalContent.includes('\r\n');
+        const finalContent = isCRLF ? newContent.replace(/\n/g, '\r\n') : newContent;
+
+        const newBuffer = encodeContent(finalContent, actualCharset as any);
         writeFileSync(resolvedPath, newBuffer);
 
         return {
@@ -222,7 +292,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const IGNORED_DIRS = new Set([".git"]);
         const exts = includeExt.split(',').map(e => e.trim().toLowerCase()).filter(e => e.length > 0);
         
-        const results: string[] = [];
+        const MAX_MATCHES = 100;
+        const MAX_LINE_LENGTH = 2000;
+        
+        let totalMatches = 0;
+        const groupedResults = new Map<string, { lineNum: number; text: string }[]>();
+        
         let regex: RegExp;
         try {
           regex = new RegExp(pattern, ignoreCase ? 'gi' : 'g');
@@ -250,13 +325,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             
             const lines = content.split('\n');
+            const fileMatches: { lineNum: number; text: string }[] = [];
+            
             for (let i = 0; i < lines.length; i++) {
+              if (totalMatches >= MAX_MATCHES) break;
               const line = lines[i];
               regex.lastIndex = 0;
               if (regex.test(line)) {
-                results.push(`${filePath}:${i + 1}:${line.trim()}`);
-                if (results.length >= 1000) break;
+                let trimmedLine = line.trim();
+                if (trimmedLine.length > MAX_LINE_LENGTH) {
+                  trimmedLine = trimmedLine.substring(0, MAX_LINE_LENGTH) + "...";
+                }
+                fileMatches.push({ lineNum: i + 1, text: trimmedLine });
+                totalMatches++;
               }
+            }
+            
+            if (fileMatches.length > 0) {
+              groupedResults.set(filePath, fileMatches);
             }
           } catch (e) {
             // ignore read error
@@ -264,7 +350,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         };
 
         const walk = (targetPath: string) => {
-          if (results.length >= 1000) return;
+          if (totalMatches >= MAX_MATCHES) return;
           try {
             const stat = statSync(targetPath);
             if (stat.isFile()) {
@@ -272,7 +358,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             } else if (stat.isDirectory()) {
               const files = readdirSync(targetPath);
               for (const file of files) {
-                if (results.length >= 1000) break;
+                if (totalMatches >= MAX_MATCHES) break;
                 if (IGNORED_DIRS.has(file)) continue;
                 
                 const fullPath = join(targetPath, file);
@@ -293,15 +379,23 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         walk(resolvedDirPath);
         
-        if (results.length === 0) {
+        if (totalMatches === 0) {
           return { content: [{ type: "text", text: "No matches found." }] };
         }
         
-        let output = results.join('\n');
-        if (results.length >= 1000) {
-          output += '\n... (truncated to 1000 results)';
+        const outputLines: string[] = [];
+        outputLines.push(`Found ${totalMatches} matches${totalMatches >= MAX_MATCHES ? ` (showing first ${MAX_MATCHES})` : ''}:`);
+        outputLines.push("");
+        
+        for (const [filePath, matches] of groupedResults.entries()) {
+          outputLines.push(`${filePath}:`);
+          for (const match of matches) {
+            outputLines.push(`  Line ${match.lineNum}: ${match.text}`);
+          }
+          outputLines.push("");
         }
-        return { content: [{ type: "text", text: output }] };
+        
+        return { content: [{ type: "text", text: outputLines.join('\n').trim() }] };
       }
 
       default:
