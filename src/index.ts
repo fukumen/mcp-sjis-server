@@ -178,6 +178,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const outputLines: string[] = [];
         outputLines.push(`--- File: ${resolvedPath} (Charset: ${charsetInfo.charset}) ---`);
+        if (charsetInfo.charset !== "shift-jis") {
+          outputLines.push(`⚠️ WARNING: Detected encoding is '${charsetInfo.charset}'. Shift JIS/CP932 was expected.`);
+        }
         outputLines.push(`--- Showing lines ${start} to ${end} of ${totalLines} ---`);
         
         for (let i = start - 1; i < end; i++) {
@@ -296,7 +299,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const MAX_LINE_LENGTH = 2000;
         
         let totalMatches = 0;
-        const groupedResults = new Map<string, { lineNum: number; text: string }[]>();
+        const groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
         
         let regex: RegExp;
         try {
@@ -342,7 +345,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
             
             if (fileMatches.length > 0) {
-              groupedResults.set(filePath, fileMatches);
+              groupedResults.set(filePath, { charset, matches: fileMatches });
             }
           } catch (e) {
             // ignore read error
@@ -387,9 +390,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         outputLines.push(`Found ${totalMatches} matches${totalMatches >= MAX_MATCHES ? ` (showing first ${MAX_MATCHES})` : ''}:`);
         outputLines.push("");
         
-        for (const [filePath, matches] of groupedResults.entries()) {
-          outputLines.push(`${filePath}:`);
-          for (const match of matches) {
+        for (const [filePath, result] of groupedResults.entries()) {
+          outputLines.push(`${filePath} (Charset: ${result.charset}):`);
+          for (const match of result.matches) {
             outputLines.push(`  Line ${match.lineNum}: ${match.text}`);
           }
           outputLines.push("");
