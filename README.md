@@ -34,6 +34,32 @@ make build
 
 MCPクライアント（OpenCode や Gemini CLI など）にこのサーバーを登録することで利用可能になります。
 
+**Hermes Agent の設定例 (`~/.hermes/config.yaml`)**:
+
+```yaml
+mcp_servers:
+  sjis-tools:
+    command: node
+    args:
+    - /home/hogehgoe/mcp-sjis-server/dist/index.js
+```
+
+**Pi の設定例 (`~/.pi/agent/mcp.json`)**:
+
+```json
+{
+  "mcpServers": {
+    "sjis-server": {
+      "command": "node",
+      "args": [
+        "/home/hogehgoe/mcp-sjis-server/dist/index.js"
+      ],
+      "directTools": true
+    }
+  }
+}
+```
+
 **OpenCode の設定例 (`~/.config/opencode/opencode.json`)**:
 
 ```json
@@ -70,14 +96,51 @@ MCPクライアント（OpenCode や Gemini CLI など）にこのサーバー�
 **設定例**:
 
 ```markdown
-## プロジェクト構成と規約 (Project Conventions)
-- **.editorconfig の遵守**: プロジェクトルートやそのサブディレクトリに `.editorconfig` が存在する場合、そこに定義されている改行コード (EOL)、インデント、文字コード等の設定を最優先で遵守すること。
-  - **Shift-JIS/CP932 ファイルの編集**:
-    - **判定基準**: `.editorconfig` の `charset` 設定が `shift_jis` または `cp932` の場合、または自動判定で Shift-JIS/CP932 と検出された場合
-    - 組み込みツールを使用するとファイル全体が utf-8 に変換されてしまうため、使用禁止。必ず以下 4 つのカスタムツールを使用すること。
-      - **読み込み**: `sjis_read` ツールを使用
-      - **書き込み**: `sjis_write` ツールを使用
-      - **編集**: `sjis_edit` ツールを使用
-      - **grep**: `sjis_grep` ツールを使用
+## ツール使用とファイル操作のルール
+
+### 重要: Shift-JIS/CP932ファイルの取り扱いルール
+
+#### 事前判定の徹底
+
+ファイルへのアクセス（読み込み・書き込み・編集・検索）が発生する場合、エージェントは処理を行う前に**必ず対象ファイルの文字コードを確認**すること。
+具体的には以下疑似Cコードのような確認を行うこと。
+
+```
+if (各プロジェクトのトップに `.editorconfig` が存在する) {
+  if (`.editorconfig` の charset が shift_jis である) {
+    Shift-JIS と断定
+  } else {
+    UTF-8 と断定
+  }
+} else if (ファイルのフッターのコメントに Shift-JIS や CP932 の記載がある) {
+    Shift-JIS と断定
+} else if (`file -i <filepath>` コマンドを実行した結果 UTF-8 である) {
+  UTF-8 と断定
+} else if (`file -i <filepath>` コマンドを実行した結果 unknown-8bit である) {
+  Shift-JIS の可能性が高いが、ユーザーに確認を求める
+} else if (`file -i <filepath>` コマンドを実行した結果それ以外) {
+  UTF-8 と断定
+} else {
+  ユーザーに確認を求める
+}
+```
+
+#### `sjis-tools` の強制適用
+
+判定の結果、文字コードが Shift-JIS または CP932 である場合は、組み込みのファイル操作ツールを使用せず、以下の専用 MCP ツール（`sjis-tools`）を必ず使用すること。
+- 読み込み: `sjis_read`
+- 書き込み: `sjis_write`
+- 編集: `sjis_edit`
+- 検索: `sjis_grep`
+
+`sjis-tools` では対応できない git diff などのコマンドを実行するときは `git diff | iconv -f shift_jis -t utf-8` のように変換することで文字化けを回避すること。
+
+※文字コードが UTF-8 などの場合は、通常の組み込みツールを使用すること。
+
+#### 組み込みツール使用禁止の理由
+
+Shift-JIS/CP932 ファイルに対して組み込みツールを使用すると、以下の致命的な問題が発生するため、使用を厳禁とする。
+- ファイル編集時にファイル全体が UTF-8 に誤変換される。
+- 読み込みや検索の段階で文字化けが発生し、その後の書き込み・編集処理でデータが破損する。
 ```
 
