@@ -45,7 +45,7 @@ function getFileMutex(filePath: string): Mutex {
 const server = new Server(
   {
     name: "sjis-tools",
-    version: "1.0.1",
+    version: "1.1.0",
   },
   {
     capabilities: {
@@ -59,7 +59,17 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
     tools: [
       {
         name: "sjis_read",
-        description: "Shift JIS/CP932 のファイルを読み込み、UTF-8 文字列として返します。",
+        description:
+                  "Shift JIS/CP932 ファイルを読み込み、UTF-8 文字列として返します。" +
+                  "terminal の cat/head/tail の代わりに使用してください。" +
+                  "出力形式は 'LINE_NUM|CONTENT'。" +
+                  "大きなファイルには startLine と endLine を使用してください。" +
+                  "最大2000行まで読み込み可能。" +
+                  "1行2000文字を超える場合は切り詰められます。" +
+                  "画像やその他のバイナリファイルの読み込みには対応していません。" +
+                  "\n\n" +
+                  "注意: ファイルの行末（CRLF または LF）はそのまま出力されます。" +
+                  "読み込んだ内容を編集する際は、元の行末を維持するよう正しく指定してください。",
         inputSchema: {
           type: "object",
           properties: {
@@ -72,7 +82,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
       },
       {
         name: "sjis_write",
-        description: "Shift JIS/CP932 エンコーディングでファイルを書き込みます。",
+        description:
+                  "Shift JIS/CP932 エンコーディングでファイルを書き込みます。" +
+                  "terminal の echo/cat ヒアドキュメントの代わりに使用してください。" +
+                  "ファイルの内容を完全に上書きします — 部分的な編集には sjis_patch を使用してください。" +
+                  "\n\n" +
+                  "注意: content に指定した行末（CRLF または LF）はそのままファイルに書き込まれます。" +
+                  "既存ファイルの行末を維持する場合は、読み込んだ内容の行末をそのまま使用してください。",
         inputSchema: {
           type: "object",
           properties: {
@@ -83,22 +99,58 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         },
       },
       {
-        name: "sjis_edit",
-        description: "Shift JIS/CP932 ファイル内のテキストを置換します。",
+        name: "sjis_patch",
+        description:
+                  "Shift JIS/CP932 ファイル内のテキストを置換します。" +
+                  "terminal の sed/awk の代わりに使用してください。" +
+                  "長い文字列や複雑な置換に適しています。" +
+                  "変更結果の diff を返します。" +
+                  "\n\n" +
+                  "REPLACE MODE (mode='replace', デフォルト): " +
+                  "ファイル内の一意の文字列を検索し、置換します。" +
+                  "REQUIRED PARAMETERS: path, oldText, newText." +
+                  "\n\n" +
+                  "注意: oldText はファイル内の文字列をそのまま指定してください" +
+                  "（行末の正規化は行われません）。" +
+                  "CRLF ファイルの場合は oldText にも CRLF を含めて指定する必要があります。" +
+                  "\n\n" +
+                  "PATCH MODE (mode='patch'): " +
+                  "V4A マルチファイルパッチを適用します。" +
+                  "REQUIRED PARAMETERS: mode, patch." +
+                  "\n\n" +
+                  "注意: PATCH MODE は 'Update File' 操作のみをサポートします。" +
+                  "'Add File', 'Delete File', 'Move File' は未対応です。" +
+                  "パッチ内容は LF で指定してください。",
         inputSchema: {
           type: "object",
           properties: {
-            path: { type: "string", description: "ファイルパス" },
-            oldText: { type: "string", description: "置換前の文字列 (UTF-8)" },
-            newText: { type: "string", description: "置換後の文字列 (UTF-8)" },
-            replaceAll: { type: "boolean", description: "trueの場合、ファイル内のすべての一致箇所を置換します（デフォルト: false）" },
+            mode: { 
+              type: "string", 
+              enum: ["replace", "patch"], 
+              description: "編集モード。'replace' (デフォルト): 文字列置換。'patch': V4Aマルチファイルパッチ" 
+            },
+            path: { type: "string", description: "ファイルパス (replace mode用)" },
+            oldText: { type: "string", description: "置換前の文字列 (UTF-8) (replace mode用)" },
+            newText: { type: "string", description: "置換後の文字列 (UTF-8) (replace mode用)" },
+            replaceAll: { type: "boolean", description: "trueの場合、すべての一致箇所を置換 (replace mode用, デフォルト: false)" },
+            patch: { 
+              type: "string", 
+              description: "V4Aフォーマットパッチコンテンツ(patch mode用)。フォーマット:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch" 
+            },
           },
-          required: ["path", "oldText", "newText"],
         },
       },
       {
         name: "sjis_grep",
-        description: "Shift JIS/CP932 エンコーディングのファイルやディレクトリから、指定した正規表現パターン（JavaScript/ECMAScript準拠）を検索します。",
+        description:
+                  "Shift JIS/CP932 エンコーディングのファイルやディレクトリから、" +
+                  "指定した正規表現パターン（JavaScript/ECMAScript準守）を検索します。" +
+                  "terminal の grep/rg/find の代わりに使用してください。" +
+                  ".git ディレクトリとバイナリファイルは自動的に除外されます。" +
+                  "検索結果は最大100件まで返されます。" +
+                  "includeExtension に拡張子を指定して検索対象を絞り込めます（例: '.c,.txt'）。" +
+                  "\n\n" +
+                  "注意: 検索結果の行末（CRLF/LF）は元のファイルのままです。",
         inputSchema: {
           type: "object",
           properties: {
@@ -109,7 +161,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           },
           required: ["pattern"],
         },
-      },
+      }
     ],
   };
 });
@@ -125,7 +177,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const resolvedPath = filePath ? (isAbsolute(filePath) ? filePath : join(process.cwd(), filePath)) : "";
 
   let release: (() => void) | undefined;
-  if (resolvedPath && (name === "sjis_read" || name === "sjis_write" || name === "sjis_edit")) {
+  if (resolvedPath && (name === "sjis_read" || name === "sjis_write" || name === "sjis_patch")) {
     const mutex = getFileMutex(resolvedPath);
     release = await mutex.acquire();
   }
@@ -185,8 +237,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         
         for (let i = start - 1; i < end; i++) {
           let line = allLines[i];
-          // Strip carriage return if present
-          if (line.endsWith('\r')) line = line.slice(0, -1);
           
           if (line.length > MAX_LINE_LENGTH) {
             line = line.substring(0, MAX_LINE_LENGTH) + " ... (line truncated to 2000 chars)";
@@ -213,71 +263,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const action = fileExists ? "Overwrote existing file" : "Created new file";
         return {
           content: [{ type: "text", text: `Successfully wrote to ${resolvedPath} in ${charset} (${action})` }],
-        };
-      }
-
-      case "sjis_edit": {
-        const oldText = String(args.oldText);
-        const newText = String(args.newText);
-        const replaceAll = args.replaceAll === true;
-
-        if (!existsSync(resolvedPath)) {
-          return {
-            content: [{ type: "text", text: `Error: File not found: ${resolvedPath}` }],
-            isError: true,
-          };
-        }
-
-        if (oldText === newText) {
-          return {
-            content: [{ type: "text", text: "Warning: oldText and newText are identical. No changes made." }],
-          };
-        }
-
-        const originalBuffer = readFileSync(resolvedPath);
-        const charsetInfo = await detectCharset(resolvedPath);
-        const actualCharset = charsetInfo.charset === "unknown"
-          ? detectCharsetFromContent(originalBuffer)
-          : charsetInfo.charset;
-
-        let originalContent: string;
-        if (actualCharset === "shift-jis") {
-          originalContent = iconv.decode(originalBuffer, "cp932");
-        } else {
-          originalContent = originalBuffer.toString("utf-8");
-        }
-
-        const normalizedContent = originalContent.replace(/\r\n/g, '\n');
-        const normalizedOldText = oldText.replace(/\r\n/g, '\n');
-
-        if (!normalizedContent.includes(normalizedOldText)) {
-          return {
-            content: [{ type: "text", text: `Error: Could not find target text in file.` }],
-            isError: true,
-          };
-        }
-
-        const matchCount = normalizedContent.split(normalizedOldText).length - 1;
-
-        if (!replaceAll && matchCount > 1) {
-          return {
-            content: [{ type: "text", text: `Error: Found ${matchCount} matches for the target text. Set 'replaceAll: true' to replace all, or provide more context in 'oldText' to match only one instance.` }],
-            isError: true,
-          };
-        }
-
-        const newContent = replaceAll
-          ? normalizedContent.split(normalizedOldText).join(newText)
-          : normalizedContent.replace(normalizedOldText, newText);
-
-        const isCRLF = originalContent.includes('\r\n');
-        const finalContent = isCRLF ? newContent.replace(/\n/g, '\r\n') : newContent;
-
-        const newBuffer = encodeContent(finalContent, actualCharset as any);
-        writeFileSync(resolvedPath, newBuffer);
-
-        return {
-          content: [{ type: "text", text: `Successfully edited ${resolvedPath} in ${actualCharset}` }],
         };
       }
 
@@ -399,6 +384,250 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         
         return { content: [{ type: "text", text: outputLines.join('\n').trim() }] };
+      }
+
+      case "sjis_patch": {
+        const mode = String(args.mode || "replace");
+        
+        if (mode === "patch") {
+          // PATCH MODE: Apply V4A multi-file patches
+          const patchContent = String(args.patch || "");
+          if (!patchContent) {
+            return {
+              content: [{ type: "text", text: "Error: patch parameter is required for patch mode." }],
+              isError: true,
+            };
+          }
+          
+          const results: string[] = [];
+          const patchLines = patchContent.split('\n');
+
+          type Edit = { oldLines: string[]; newLines: string[]; contextHint: string };
+          type FilePatch = { filePath: string; edits: Edit[] };
+
+          const filePatches: FilePatch[] = [];
+          let currentFilePatch: FilePatch | null = null;
+          let currentEdit: Edit | null = null;
+          let i = 0;
+          
+          while (i < patchLines.length) {
+            const line = patchLines[i];
+            
+            if (line === "*** Begin Patch") {
+              i++;
+              while (i < patchLines.length && patchLines[i] !== "*** End Patch") {
+                const innerLine = patchLines[i];
+                
+                if (innerLine.startsWith("*** Update File: ")) {
+                  if (currentEdit && currentFilePatch) {
+                    currentFilePatch.edits.push(currentEdit);
+                    currentEdit = null;
+                  }
+                  const targetFile = innerLine.substring("*** Update File: ".length).trim();
+                  currentFilePatch = { filePath: targetFile, edits: [] };
+                  filePatches.push(currentFilePatch);
+                } else if (innerLine.startsWith("@@ ")) {
+                  if (currentEdit && currentFilePatch) {
+                    currentFilePatch.edits.push(currentEdit);
+                  }
+                  currentEdit = { oldLines: [], newLines: [], contextHint: innerLine };
+                } else if (innerLine.startsWith("-")) {
+                  if (currentEdit) {
+                    currentEdit.oldLines.push(innerLine.substring(1));
+                  }
+                } else if (innerLine.startsWith("+")) {
+                  if (currentEdit) {
+                    currentEdit.newLines.push(innerLine.substring(1));
+                  }
+                } else if (innerLine.startsWith(" ")) {
+                  if (currentEdit) {
+                    const content = innerLine.substring(1);
+                    currentEdit.oldLines.push(content);
+                    currentEdit.newLines.push(content);
+                  }
+                } else if (innerLine === "") {
+                  // Empty lines between hunks are skipped (not part of patch content)
+                }
+                i++;
+              }
+              
+              if (currentEdit && currentFilePatch) {
+                currentFilePatch.edits.push(currentEdit);
+                currentEdit = null;
+              }
+              i++;
+            } else {
+              i++;
+            }
+          }
+
+          if (filePatches.length === 0) {
+            return {
+              content: [{ type: "text", text: "Error: No valid patches found in patch parameter." }],
+              isError: true,
+            };
+          }
+
+          for (const filePatch of filePatches) {
+            const { filePath: targetFile, edits } = filePatch;
+            if (!targetFile || edits.length === 0) continue;
+
+            let patchFileRelease: (() => void) | undefined;
+            try {
+              const resolvedPatchPath = isAbsolute(targetFile) ? targetFile : join(process.cwd(), targetFile);
+              
+              if (!existsSync(resolvedPatchPath)) {
+                results.push(`Error: File not found: ${resolvedPatchPath}`);
+                continue;
+              }
+              
+              const patchMutex = getFileMutex(resolvedPatchPath);
+              patchFileRelease = await patchMutex.acquire();
+              
+              const originalBuffer = readFileSync(resolvedPatchPath);
+              const charsetInfo = await detectCharset(resolvedPatchPath);
+              const actualCharset = charsetInfo.charset === "unknown"
+                ? detectCharsetFromContent(originalBuffer)
+                : charsetInfo.charset;
+              
+              let originalContent: string;
+              if (actualCharset === "shift-jis") {
+                originalContent = iconv.decode(originalBuffer, "cp932");
+              } else {
+                originalContent = originalBuffer.toString("utf-8");
+              }
+              
+              let newContent = originalContent;
+              let allApplied = true;
+              
+              for (const edit of edits) {
+                const oldText = edit.oldLines.join('\n');
+                const newText = edit.newLines.join('\n');
+                
+                if (!newContent.includes(oldText)) {
+                  results.push(`Error: Could not find target text in ${resolvedPatchPath}`);
+                  allApplied = false;
+                  break;
+                }
+                
+                newContent = newContent.replace(oldText, () => newText);
+              }
+              
+              if (allApplied) {
+                const newBuffer = encodeContent(newContent, actualCharset as any);
+                writeFileSync(resolvedPatchPath, newBuffer);
+
+                const diffLines: string[] = [];
+                diffLines.push(`--- ${resolvedPatchPath}`);
+                diffLines.push(`+++ ${resolvedPatchPath}`);
+                for (const edit of edits) {
+                  if (edit.contextHint) {
+                    diffLines.push(edit.contextHint);
+                  }
+                  for (const oldL of edit.oldLines) {
+                    diffLines.push(`-${oldL}`);
+                  }
+                  for (const newL of edit.newLines) {
+                    diffLines.push(`+${newL}`);
+                  }
+                }
+
+                results.push(`Successfully patched ${resolvedPatchPath} in ${actualCharset}\n\`\`\`diff\n${diffLines.join('\n')}\n\`\`\``);
+              }
+            } catch (e: any) {
+              results.push(`Error patching ${targetFile}: ${e.message}`);
+            } finally {
+              if (patchFileRelease) patchFileRelease();
+            }
+          }
+          
+          return {
+            content: [{ type: "text", text: results.join('\n\n') }],
+          };
+        }
+        
+        // REPLACE MODE: find and replace text (as-is, no line ending normalization)
+        const oldText = String(args.oldText);
+        const newText = String(args.newText);
+        const replaceAll = args.replaceAll === true;
+        
+        if (oldText === "") {
+          return {
+            content: [{ type: "text", text: "Error: oldText parameter is required and cannot be empty." }],
+            isError: true,
+          };
+        }
+        
+        if (oldText === newText) {
+          return {
+            content: [{ type: "text", text: "Warning: oldText and newText are identical. No changes made." }],
+          };
+        }
+        
+        if (!resolvedPath) {
+          return {
+            content: [{ type: "text", text: "Error: path parameter is required for replace mode." }],
+            isError: true,
+          };
+        }
+        
+        if (!existsSync(resolvedPath)) {
+          return {
+            content: [{ type: "text", text: `Error: File not found: ${resolvedPath}` }],
+            isError: true,
+          };
+        }
+        
+        const originalBuffer = readFileSync(resolvedPath);
+        const charsetInfo = await detectCharset(resolvedPath);
+        const actualCharset = charsetInfo.charset === "unknown"
+          ? detectCharsetFromContent(originalBuffer)
+          : charsetInfo.charset;
+        
+        let originalContent: string;
+        if (actualCharset === "shift-jis") {
+          originalContent = iconv.decode(originalBuffer, "cp932");
+        } else {
+          originalContent = originalBuffer.toString("utf-8");
+        }
+        
+        if (!originalContent.includes(oldText)) {
+          return {
+            content: [{ type: "text", text: `Error: Could not find target text in file.` }],
+            isError: true,
+          };
+        }
+        
+        const matchCount = originalContent.split(oldText).length - 1;
+        
+        if (!replaceAll && matchCount > 1) {
+          return {
+            content: [{ type: "text", text: `Error: Found ${matchCount} matches for the target text. Set 'replaceAll: true' to replace all, or provide more context in 'oldText' to match only one instance.` }],
+            isError: true,
+          };
+        }
+        
+        const newContent = replaceAll
+          ? originalContent.split(oldText).join(newText)
+          : originalContent.replace(oldText, () => newText);
+        
+        const newBuffer = encodeContent(newContent, actualCharset as any);
+        writeFileSync(resolvedPath, newBuffer);
+
+        // Diff: show what changed
+        const diffLines: string[] = [];
+        diffLines.push(`--- ${resolvedPath}`);
+        diffLines.push(`+++ ${resolvedPath}`);
+        for (const line of oldText.split('\n')) {
+          diffLines.push(`-${line}`);
+        }
+        for (const line of newText.split('\n')) {
+          diffLines.push(`+${line}`);
+        }
+        
+        return {
+          content: [{ type: "text", text: `Successfully edited ${resolvedPath} in ${actualCharset}\n\`\`\`diff\n${diffLines.join('\n')}\n\`\`\`` }],
+        };
       }
 
       default:

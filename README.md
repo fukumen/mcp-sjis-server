@@ -9,8 +9,11 @@ Shift-JIS / CP932 エンコーディングのファイルを透過的に読み�
   - 引数: `path` (ファイルパス), `startLine` (オプション: 開始行), `endLine` (オプション: 終了行)
 - `sjis_write`: UTF-8 の文字列を受け取り、対象の文字コードでファイルに書き込みます。
   - 引数: `path` (ファイルパス), `content` (書き込むテキスト)
-- `sjis_edit`: ファイル内の特定テキスト（UTF-8）を検索し、置換した上で保存します。
-  - 引数: `path` (ファイルパス), `oldText` (置換前), `newText` (置換後)
+- `sjis_patch`: ファイル内のテキストを置換します。2つのモードを提供します。
+  - **replace mode** (デフォルト): 一意の文字列を検索し置換します。変更結果の diff を返します。
+    - 引数: `path` (ファイルパス), `oldText` (置換前), `newText` (置換後), `replaceAll` (オプション: 全置換)
+  - **patch mode**: V4A フォーマットのパッチを適用し、複数ファイルを一括編集できます。
+    - 引数: `mode: "patch"`, `patch` (V4Aパッチ内容)
 - `sjis_grep`: 対象ディレクトリ内のファイルから、指定した正規表現パターン（JavaScript/ECMAScript準拠）を検索し、行番号付きで結果を返します。
   - 引数: `pattern` (正規表現パターン), `dirPath` (オプション: 検索対象ディレクトリ), `includeExtension` (オプション: 検索対象とする拡張子), `ignoreCase` (オプション: 大文字小文字を区別しない)
 
@@ -130,7 +133,7 @@ if (各プロジェクトのトップに `.editorconfig` が存在する) {
 判定の結果、文字コードが Shift-JIS または CP932 である場合は、組み込みのファイル操作ツールを使用せず、以下の専用 MCP ツール（`sjis-tools`）を必ず使用すること。
 - 読み込み: `sjis_read`
 - 書き込み: `sjis_write`
-- 編集: `sjis_edit`
+- 編集: `sjis_patch`
 - 検索: `sjis_grep`
 
 `sjis-tools` では対応できない git diff などのコマンドを実行するときは `git diff | iconv -f shift_jis -t utf-8` のように変換することで文字化けを回避すること。
