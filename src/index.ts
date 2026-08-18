@@ -246,6 +246,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         if (end < totalLines) {
           outputLines.push(`\n... (Showing lines ${start}-${end} of ${totalLines}. Use startLine=${end + 1} to continue reading.)`);
+        } else if (end === totalLines) {
+          outputLines.push(`--- EOF (reached end of file, ${totalLines} total lines) ---`);
         }
 
         return {
