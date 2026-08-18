@@ -155,11 +155,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           type: "object",
           properties: {
             pattern: { type: "string", description: "検索する正規表現パターン（JavaScript準拠）" },
-            dirPath: { type: "string", description: "検索対象のディレクトリまたはファイルパス（デフォルト: カレントディレクトリ）" },
+            path: { type: "string", description: "検索対象のディレクトリまたはファイルパス" },
             includeExtension: { type: "string", description: "検索対象とする拡張子（例: .c,.txt）" },
             ignoreCase: { type: "boolean", description: "大文字小文字を区別するかどうか（デフォルト: false）" },
           },
-          required: ["pattern"],
+          required: ["pattern", "path"],
         },
       }
     ],
@@ -185,6 +185,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     switch (name) {
       case "sjis_read": {
+        const allowedKeys = ["path", "startLine", "endLine"];
+        const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
+        if (unknownKeys.length > 0) {
+          return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_read: ${unknownKeys.join(", ")}` }], isError: true };
+        }
         if (!existsSync(resolvedPath)) {
           return {
             content: [{ type: "text", text: `Error: File not found: ${resolvedPath}` }],
@@ -256,6 +261,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "sjis_write": {
+        const allowedKeys = ["path", "content"];
+        const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
+        if (unknownKeys.length > 0) {
+          return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_write: ${unknownKeys.join(", ")}` }], isError: true };
+        }
         const contentToWrite = String(args.content);
         const fileExists = existsSync(resolvedPath);
         const charsetInfo = await detectCharset(resolvedPath);
@@ -269,8 +279,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "sjis_grep": {
+        const allowedKeys = ["pattern", "path", "includeExtension", "ignoreCase"];
+        const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
+        if (unknownKeys.length > 0) {
+          return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_grep: ${unknownKeys.join(", ")}` }], isError: true };
+        }
+        if (args.pattern === undefined || args.path === undefined) {
+          return { content: [{ type: "text", text: "Error: pattern and path are required for sjis_grep." }], isError: true };
+        }
         const pattern = String(args.pattern);
-        const dirPath = args.dirPath ? String(args.dirPath) : process.cwd();
+        const dirPath = String(args.path);
         const includeExt = args.includeExtension ? String(args.includeExtension) : "";
         const ignoreCase = args.ignoreCase === true;
         
@@ -389,6 +407,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "sjis_patch": {
+        const allowedKeys = ["mode", "path", "oldText", "newText", "replaceAll", "patch"];
+        const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
+        if (unknownKeys.length > 0) {
+          return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_patch: ${unknownKeys.join(", ")}` }], isError: true };
+        }
         const mode = String(args.mode || "replace");
         
         if (mode === "patch") {
