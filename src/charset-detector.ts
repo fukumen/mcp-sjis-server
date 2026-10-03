@@ -49,7 +49,11 @@ export async function detectCharset(
   return { charset: "unknown", source: "detection" };
 }
 
-export function detectCharsetFromContent(buffer: Buffer): "utf-8" | "shift-jis" {
+export function detectCharsetFromContent(buffer: Buffer): "ascii" | "utf-8" | "shift-jis" {
+  if (buffer.every((b) => b < 0x80)) {
+    return "ascii";
+  }
+
   try {
     const decoder = new TextDecoder("utf-8", { fatal: true });
     decoder.decode(buffer);

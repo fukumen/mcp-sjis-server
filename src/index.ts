@@ -211,6 +211,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
         const buffer = readFileSync(resolvedPath);
         const charsetInfo = await detectCharset(resolvedPath);
+        const displayCharset = charsetInfo.charset === "unknown"
+          ? detectCharsetFromContent(buffer)
+          : charsetInfo.charset;
         const rawContent = readFileWithCharset(buffer, charsetInfo.charset);
         const allLines = rawContent.split('\n');
         const totalLines = allLines.length;
@@ -234,9 +237,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const outputLines: string[] = [];
-        outputLines.push(`--- File: ${resolvedPath} (Charset: ${charsetInfo.charset}) ---`);
-        if (charsetInfo.charset !== "shift-jis") {
-          outputLines.push(`⚠️ WARNING: Detected encoding is '${charsetInfo.charset}'. Shift JIS/CP932 was expected.`);
+        outputLines.push(`--- File: ${resolvedPath} (Charset: ${displayCharset}) ---`);
+        if (displayCharset !== "shift-jis") {
+          outputLines.push(`⚠️ WARNING: Detected encoding is '${displayCharset}'. Shift JIS/CP932 was expected.`);
         }
         outputLines.push(`--- Showing lines ${start} to ${end} of ${totalLines} ---`);
         
