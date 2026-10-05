@@ -42,6 +42,10 @@ function getFileMutex(filePath: string): Mutex {
   return mutex;
 }
 
+function absolutePathErrorMessage(argName: string, value: string): string {
+  return `Error: ${argName} must be an absolute path (got relative: "${value}"). Relative paths are resolved against the MCP server's own working directory, not the agent's. Use an absolute path.`;
+}
+
 const server = new Server(
   {
     name: "sjis-tools",
@@ -73,7 +77,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            path: { type: "string", description: "ファイルパス" },
+            path: { type: "string", description: "ファイルの絶対パス" },
             startLine: { type: "number", description: "読み込みを開始する行番号（1始まり）" },
             endLine: { type: "number", description: "読み込みを終了する行番号（1始まり）" },
           },
@@ -92,7 +96,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         inputSchema: {
           type: "object",
           properties: {
-            path: { type: "string", description: "ファイルパス" },
+            path: { type: "string", description: "ファイルの絶対パス" },
             content: { type: "string", description: "書き込む UTF-8 文字列" },
           },
           required: ["path", "content"],
@@ -129,13 +133,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               enum: ["replace", "patch"], 
               description: "編集モード。'replace' (デフォルト): 文字列置換。'patch': V4Aマルチファイルパッチ" 
             },
-            path: { type: "string", description: "ファイルパス (replace mode用)" },
+            path: { type: "string", description: "ファイルの絶対パス (replace mode用)" },
             oldText: { type: "string", description: "置換前の文字列 (UTF-8) (replace mode用)" },
             newText: { type: "string", description: "置換後の文字列 (UTF-8) (replace mode用)" },
             replaceAll: { type: "boolean", description: "trueの場合、すべての一致箇所を置換 (replace mode用, デフォルト: false)" },
             patch: { 
               type: "string", 
-              description: "V4Aフォーマットパッチコンテンツ(patch mode用)。フォーマット:\n*** Begin Patch\n*** Update File: path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch" 
+              description: "V4Aフォーマットパッチコンテンツ(patch mode用)。フォーマット:\n*** Begin Patch\n*** Update File: /absolute/path/to/file\n@@ context hint @@\n context line\n-removed line\n+added line\n*** End Patch" 
             },
           },
         },
@@ -155,7 +159,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           type: "object",
           properties: {
             pattern: { type: "string", description: "検索する正規表現パターン（JavaScript準拠）" },
-            path: { type: "string", description: "検索対象のディレクトリまたはファイルパス" },
+            path: { type: "string", description: "検索対象のディレクトリまたはファイルの絶対パス" },
             includeExtension: { type: "string", description: "検索対象とする拡張子（例: .c,.txt）" },
             ignoreCase: { type: "boolean", description: "大文字小文字を区別するかどうか（デフォルト: false）" },
           },
@@ -174,7 +178,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   }
 
   const filePath = args.path ? String(args.path) : "";
-  const resolvedPath = filePath ? (isAbsolute(filePath) ? filePath : join(process.cwd(), filePath)) : "";
+  if (filePath && !isAbsolute(filePath)) {
+    return {
+      content: [{ type: "text", text: absolutePathErrorMessage("path", filePath) }],
+      isError: true,
+    };
+  }
+  const resolvedPath = filePath;
 
   let release: (() => void) | undefined;
   if (resolvedPath && (name === "sjis_read" || name === "sjis_write" || name === "sjis_patch")) {
@@ -295,7 +305,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const includeExt = args.includeExtension ? String(args.includeExtension) : "";
         const ignoreCase = args.ignoreCase === true;
         
-        const resolvedDirPath = isAbsolute(dirPath) ? dirPath : join(process.cwd(), dirPath);
+        if (!isAbsolute(dirPath)) {
+          return {
+            content: [{ type: "text", text: absolutePathErrorMessage("path", dirPath) }],
+            isError: true,
+          };
+        }
+        const resolvedDirPath = dirPath;
         if (!existsSync(resolvedDirPath)) {
           return { content: [{ type: "text", text: `Error: Directory not found: ${resolvedDirPath}` }], isError: true };
         }
@@ -502,7 +518,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
             let patchFileRelease: (() => void) | undefined;
             try {
-              const resolvedPatchPath = isAbsolute(targetFile) ? targetFile : join(process.cwd(), targetFile);
+              if (!isAbsolute(targetFile)) {
+                results.push(absolutePathErrorMessage("file path in patch", targetFile));
+                continue;
+              }
+              const resolvedPatchPath = targetFile;
               
               if (!existsSync(resolvedPatchPath)) {
                 results.push(`Error: File not found: ${resolvedPatchPath}`);
