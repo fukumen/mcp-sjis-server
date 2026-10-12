@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as iconv from "iconv-lite";
@@ -431,6 +431,83 @@ test("[E2E-05] sjis_read/sjis_grep は行末コードを元のデータのまま
     assert.match(resGrepMixed.result.content[0].text, /Line 2: B\n/);
     assert.match(resGrepMixed.result.content[0].text, /Line 3: C\r\n/);
     assert.match(resGrepMixed.result.content[0].text, /Line 4: D\r\n/);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-06] sjis_grep は正規表現で一致しないときリテラル一致のヒントを返す", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    // "foo(bar)" は正規表現としては foobar に一致するパターンなので、
+    // リテラル文字列 foo(bar) を含むファイルには正規表現として一致しない
+    const target = join(dir, "hint.txt");
+    writeFileSync(target, "foo(bar)\r\nbaz\r\n");
+    const res = await request(2, "tools/call", {
+      name: "sjis_grep",
+      arguments: { pattern: "foo(bar)", path: target },
+    });
+    const text = res.result.content[0].text;
+    assert.match(text, /No regex matches found/);
+    assert.match(text, /1 literal match/);
+    assert.match(text, /To search literally/);
+
+    // メタ文字を含まないパターンで 0 件のときは従来どおりのメッセージ
+    const resNone = await request(3, "tools/call", {
+      name: "sjis_grep",
+      arguments: { pattern: "quux", path: target },
+    });
+    assert.equal(resNone.result.content[0].text, "No matches found.");
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-07] sjis_grep の includeExtension は接尾辞一致で拡張子無しファイルも指定できる", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    const sub = join(dir, "files");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "Makefile"), "needle makefile\n");
+    writeFileSync(join(sub, "a.c"), "needle c\n");
+    writeFileSync(join(sub, "readme"), "needle readme\n");
+    writeFileSync(join(sub, "data.bin"), "needle bin\n");
+
+    const grep = async (id: number, includeExtension?: string) => {
+      const args: Record<string, unknown> = { pattern: "needle", path: sub };
+      if (includeExtension !== undefined) args.includeExtension = includeExtension;
+      const res = await request(id, "tools/call", { name: "sjis_grep", arguments: args });
+      return [...res.result.content[0].text.matchAll(/files[/\\]([^\s:]+)/g)].map((m: RegExpMatchArray) => m[1]);
+    };
+
+    // 接尾辞一致: ドット付き拡張子は拡張子を持つファイルだけに一致する
+    assert.deepEqual(await grep(2, ".c"), ["a.c"]);
+    // ファイル名やその一部を指定すれば拡張子の無いファイルも検索できる
+    assert.deepEqual(await grep(3, "akefile"), ["Makefile"]);
+    assert.deepEqual((await grep(4, ".c,readme")).sort(), ["a.c", "readme"]);
+    // 省略時はバイナリ拡張子（png/pdf/zip 等）のみ除外。.bin はリスト外なので対象
+    const all = await grep(5, undefined);
+    assert.deepEqual(all.sort(), ["Makefile", "a.c", "data.bin", "readme"]);
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });

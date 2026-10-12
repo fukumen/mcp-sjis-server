@@ -179,17 +179,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "terminal の grep/rg/find の代わりに使用してください。" +
                   ".git ディレクトリとバイナリファイルは自動的に除外されます。" +
                   "検索結果は最大100件まで返されます。" +
-                  "includeExtension に拡張子を指定して検索対象を絞り込めます（例: '.c,.txt'）。" +
+                  "includeExtension でファイル名の接尾辞（カンマ区切り、例: '.c,.txt'）に検索対象を絞り込めます。" +
+                  "接尾辞一致のため、拡張子の無いファイルはファイル名やその一部（例: 'Makefile'）を指定すれば検索できます。" +
+                  "省略時はバイナリ形式（png/pdf/zip 等）のみ除外し、指定時はこの除外を無視して接尾辞に一致するファイルのみを検索します。" +
                   "\n\n" +
                   "注意: 検索結果の行末（CRLF/LF/CR）は元のファイルのままです。" +
                   "マッチ行は行頭の空白も含め元の行のまま返します。" +
+                  "正規表現として一致しない場合、パターンにメタ文字が含まれていればリテラル一致の件数をヒントとして返します。" +
                   "行が2000文字を超える場合は切り詰められます。",
         inputSchema: {
           type: "object",
           properties: {
             pattern: { type: "string", description: "検索する正規表現パターン（JavaScript準拠）" },
             path: { type: "string", description: "検索対象のディレクトリまたはファイルの絶対パス" },
-            includeExtension: { type: "string", description: "検索対象とする拡張子（例: .c,.txt）" },
+            includeExtension: { type: "string", description: "検索対象とするファイル名の接尾辞（カンマ区切り、例: '.c,.txt'）" },
             ignoreCase: { type: "boolean", description: "大文字小文字を区別するかどうか（デフォルト: false）" },
           },
           required: ["pattern", "path"],
@@ -352,8 +355,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const MAX_LINE_LENGTH = 2000;
         
         let totalMatches = 0;
-        const groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
+        let groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
         
+        let matchLineFn: (line: string) => boolean;
         let regex: RegExp;
         try {
           regex = new RegExp(pattern, ignoreCase ? 'gi' : 'g');
@@ -386,8 +390,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             for (let i = 0; i < lines.length; i++) {
               if (totalMatches >= MAX_MATCHES) break;
               const line = lines[i];
-              regex.lastIndex = 0;
-              if (regex.test(line)) {
+              if (matchLineFn(line)) {
                 // 行末コード（\r）も元のデータの一部としてそのまま返す
                 let matchLine = line;
                 if (matchLine.length > MAX_LINE_LENGTH) {
@@ -434,9 +437,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
         };
 
+        matchLineFn = (line: string) => {
+          regex.lastIndex = 0;
+          return regex.test(line);
+        };
         walk(resolvedDirPath);
-        
+
         if (totalMatches === 0) {
+          // パターンにメタ文字が含まれて正規表現として 0 件のとき、
+          // リテラル一致が存在すればその件数をヒントとして返す
+          if (/[.*+?^${}()|[\]\\]/.test(pattern)) {
+            totalMatches = 0;
+            groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
+            matchLineFn = (line: string) => line.includes(pattern);
+            walk(resolvedDirPath);
+            if (totalMatches > 0) {
+              const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+              return {
+                content: [{
+                  type: "text",
+                  text: `No regex matches found. The pattern contains regex metacharacters; ${totalMatches} literal match(es) in ${groupedResults.size} file(s). To search literally, escape them: ${escaped}`,
+                }],
+              };
+            }
+          }
           return { content: [{ type: "text", text: "No matches found." }] };
         }
         
