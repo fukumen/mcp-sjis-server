@@ -15,6 +15,7 @@ import {
   readFileWithCharset,
 } from "./charset-detector.js";
 import * as iconv from "iconv-lite";
+import { buildUnifiedDiff } from "./unified-diff.js";
 
 class Mutex {
   private queue: Promise<void> = Promise.resolve();
@@ -565,22 +566,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 const newBuffer = encodeContent(newContent, actualCharset as any);
                 writeFileSync(resolvedPatchPath, newBuffer);
 
-                const diffLines: string[] = [];
-                diffLines.push(`--- ${resolvedPatchPath}`);
-                diffLines.push(`+++ ${resolvedPatchPath}`);
-                for (const edit of edits) {
-                  if (edit.contextHint) {
-                    diffLines.push(edit.contextHint);
-                  }
-                  for (const oldL of edit.oldLines) {
-                    diffLines.push(`-${oldL}`);
-                  }
-                  for (const newL of edit.newLines) {
-                    diffLines.push(`+${newL}`);
-                  }
-                }
-
-                results.push(`Successfully patched ${resolvedPatchPath} in ${actualCharset}\n\`\`\`diff\n${diffLines.join('\n')}\n\`\`\``);
+                const diff = buildUnifiedDiff(resolvedPatchPath, originalContent, newContent);
+                const diffBlock = diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : "";
+                results.push(`Successfully patched ${resolvedPatchPath} in ${actualCharset} (${edits.length} edit${edits.length > 1 ? "s" : ""})${diffBlock}`);
               }
             } catch (e: any) {
               results.push(`Error patching ${targetFile}: ${e.message}`);
@@ -662,19 +650,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const newBuffer = encodeContent(newContent, actualCharset as any);
         writeFileSync(resolvedPath, newBuffer);
 
-        // Diff: show what changed
-        const diffLines: string[] = [];
-        diffLines.push(`--- ${resolvedPath}`);
-        diffLines.push(`+++ ${resolvedPath}`);
-        for (const line of oldText.split('\n')) {
-          diffLines.push(`-${line}`);
-        }
-        for (const line of newText.split('\n')) {
-          diffLines.push(`+${line}`);
-        }
-        
+        // Diff: unified diff generated from the actual before/after content
+        const diff = buildUnifiedDiff(resolvedPath, originalContent, newContent);
+        const diffBlock = diff ? `\n\`\`\`diff\n${diff}\n\`\`\`` : "";
         return {
-          content: [{ type: "text", text: `Successfully edited ${resolvedPath} in ${actualCharset}\n\`\`\`diff\n${diffLines.join('\n')}\n\`\`\`` }],
+          content: [{ type: "text", text: `Successfully edited ${resolvedPath} in ${actualCharset} (${matchCount} replacement${matchCount > 1 ? "s" : ""})${diffBlock}` }],
         };
       }
 
