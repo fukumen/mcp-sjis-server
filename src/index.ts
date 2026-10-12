@@ -47,6 +47,23 @@ function absolutePathErrorMessage(argName: string, value: string): string {
   return `Error: ${argName} must be an absolute path (got relative: "${value}"). Relative paths are resolved against the MCP server's own working directory, not the agent's. Use an absolute path.`;
 }
 
+// \r\n / \r / \n を等しい改行（行区切り）として行に分割する（表示用）。
+// 行番号や検索の行区切りにのみ使用し、マッチングには使わない。
+// 行末の \n はリスト表示の区切り文字として行内容から除くが、
+// \r はデータとして行末に保持する（CRLF ファイルの各行は \r で終わる）。
+function splitDisplayLines(content: string): string[] {
+  const lines: string[] = [];
+  const re = /\r\n|\r|\n/g;
+  let last = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) {
+    lines.push(content.slice(last, m.index) + (m[0].endsWith("\n") ? m[0].slice(0, -1) : m[0]));
+    last = m.index + m[0].length;
+  }
+  lines.push(content.slice(last));
+  return lines;
+}
+
 const server = new Server(
   {
     name: "sjis-tools",
@@ -67,13 +84,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         description:
                   "Shift JIS/CP932 ファイルを読み込み、UTF-8 文字列として返します。" +
                   "terminal の cat/head/tail の代わりに使用してください。" +
-                  "出力形式は 'LINE_NUM|CONTENT'。" +
+                  "出力形式は '行番号: 行内容' の連結テキストで、先頭にファイル情報のヘッダ行、末尾に EOF マーカーが付きます。" +
                   "大きなファイルには startLine と endLine を使用してください。" +
                   "最大2000行まで読み込み可能。" +
                   "1行2000文字を超える場合は切り詰められます。" +
                   "画像やその他のバイナリファイルの読み込みには対応していません。" +
                   "\n\n" +
-                  "注意: ファイルの行末（CRLF または LF）はそのまま出力されます。" +
+                  "注意: ファイルの行末（CRLF / LF / CR）はそのまま出力されます。" +
                   "読み込んだ内容を編集する際は、元の行末を維持するよう正しく指定してください。",
         inputSchema: {
           type: "object",
@@ -91,8 +108,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "Shift JIS/CP932 エンコーディングでファイルを書き込みます。" +
                   "terminal の echo/cat ヒアドキュメントの代わりに使用してください。" +
                   "ファイルの内容を完全に上書きします — 部分的な編集には sjis_patch を使用してください。" +
+                  "既存ファイルは検出された文字コードのまま上書きし、新規ファイルは Shift JIS で書き込みます。" +
                   "\n\n" +
-                  "注意: content に指定した行末（CRLF または LF）はそのままファイルに書き込まれます。" +
+                  "注意: content に指定した行末（CRLF / LF / CR）はそのままファイルに書き込まれます。" +
                   "既存ファイルの行末を維持する場合は、読み込んだ内容の行末をそのまま使用してください。",
         inputSchema: {
           type: "object",
@@ -118,14 +136,22 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "注意: oldText はファイル内の文字列をそのまま指定してください" +
                   "（行末の正規化は行われません）。" +
                   "CRLF ファイルの場合は oldText にも CRLF を含めて指定する必要があります。" +
+                  "newText は指定した文字のまま書き込まれます（行末コードの変換も行われません）。" +
+                  "複数箇所で一致した場合はエラーになります（replaceAll: true で全置換）。" +
                   "\n\n" +
                   "PATCH MODE (mode='patch'): " +
                   "V4A マルチファイルパッチを適用します。" +
                   "REQUIRED PARAMETERS: mode, patch." +
                   "\n\n" +
+                  "行末コード（CR/LF）は文字の一部として扱われ、変換・正規化されません。" +
+                  "old 側の行にはファイルに実際にある行末コードを含めて指定し、" +
+                  "new 側の行に書いた行末コードがそのまま書き込まれます。" +
+                  "CRLF 行末で書いたパッチは new 側の行も CRLF として書き込まれます。" +
+                  "パッチテキスト自体の行末は LF / CRLF のどちらでも解析できます。" +
+                  "@@ 行は各 hunk の開始に必須です（内容はマッチに使用されません）。" +
+                  "\n\n" +
                   "注意: PATCH MODE は 'Update File' 操作のみをサポートします。" +
-                  "'Add File', 'Delete File', 'Move File' は未対応です。" +
-                  "パッチ内容は LF で指定してください。",
+                  "'Add File', 'Delete File', 'Move File' は未対応です。",
         inputSchema: {
           type: "object",
           properties: {
@@ -149,13 +175,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         name: "sjis_grep",
         description:
                   "Shift JIS/CP932 エンコーディングのファイルやディレクトリから、" +
-                  "指定した正規表現パターン（JavaScript/ECMAScript準守）を検索します。" +
+                  "指定した正規表現パターン（JavaScript/ECMAScript準拠）を検索します。" +
                   "terminal の grep/rg/find の代わりに使用してください。" +
                   ".git ディレクトリとバイナリファイルは自動的に除外されます。" +
                   "検索結果は最大100件まで返されます。" +
                   "includeExtension に拡張子を指定して検索対象を絞り込めます（例: '.c,.txt'）。" +
                   "\n\n" +
-                  "注意: 検索結果の行末（CRLF/LF）は元のファイルのままです。",
+                  "注意: 検索結果の行末（CRLF/LF/CR）は元のファイルのままです。" +
+                  "マッチ行は行頭の空白も含め元の行のまま返します。" +
+                  "行が2000文字を超える場合は切り詰められます。",
         inputSchema: {
           type: "object",
           properties: {
@@ -226,7 +254,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           ? detectCharsetFromContent(buffer)
           : charsetInfo.charset;
         const rawContent = readFileWithCharset(buffer, charsetInfo.charset);
-        const allLines = rawContent.split('\n');
+        const allLines = splitDisplayLines(rawContent);
         const totalLines = allLines.length;
 
         const MAX_READ_LIMIT = 2000;
@@ -352,7 +380,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               content = buffer.toString("utf-8");
             }
             
-            const lines = content.split('\n');
+            const lines = splitDisplayLines(content);
             const fileMatches: { lineNum: number; text: string }[] = [];
             
             for (let i = 0; i < lines.length; i++) {
@@ -360,11 +388,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               const line = lines[i];
               regex.lastIndex = 0;
               if (regex.test(line)) {
-                let trimmedLine = line.trim();
-                if (trimmedLine.length > MAX_LINE_LENGTH) {
-                  trimmedLine = trimmedLine.substring(0, MAX_LINE_LENGTH) + "...";
+                // 行末コード（\r）も元のデータの一部としてそのまま返す
+                let matchLine = line;
+                if (matchLine.length > MAX_LINE_LENGTH) {
+                  matchLine = matchLine.substring(0, MAX_LINE_LENGTH) + "...";
                 }
-                fileMatches.push({ lineNum: i + 1, text: trimmedLine });
+                fileMatches.push({ lineNum: i + 1, text: matchLine });
                 totalMatches++;
               }
             }
@@ -423,7 +452,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           outputLines.push("");
         }
         
-        return { content: [{ type: "text", text: outputLines.join('\n').trim() }] };
+        // 末尾の trim() をしない（最終マッチ行の行末 \r を元のデータのまま返すため）
+        return { content: [{ type: "text", text: outputLines.join('\n') }] };
       }
 
       case "sjis_patch": {
@@ -455,13 +485,19 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           let currentEdit: Edit | null = null;
           let i = 0;
           
+          // パッチ文書の行末 \r は改行コードの一部（CRLF 行末のパッチに対応）として
+          // 構文解析のために剥く。内容行の \r は文字の一部なので raw からそのまま取り出す。
+          const stripTransportCr = (line: string): string =>
+            line.endsWith("\r") ? line.slice(0, -1) : line;
+
           while (i < patchLines.length) {
-            const line = patchLines[i];
+            const line = stripTransportCr(patchLines[i]);
             
             if (line === "*** Begin Patch") {
               i++;
-              while (i < patchLines.length && patchLines[i] !== "*** End Patch") {
-                const innerLine = patchLines[i];
+              while (i < patchLines.length && stripTransportCr(patchLines[i]) !== "*** End Patch") {
+                const innerRaw = patchLines[i];
+                const innerLine = stripTransportCr(innerRaw);
                 
                 if (innerLine.startsWith("*** Update File: ")) {
                   if (currentEdit && currentFilePatch) {
@@ -478,15 +514,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                   currentEdit = { oldLines: [], newLines: [], contextHint: innerLine };
                 } else if (innerLine.startsWith("-")) {
                   if (currentEdit) {
-                    currentEdit.oldLines.push(innerLine.substring(1));
+                    // 行末 \r も文字の一部として保持する（LF/CRLF の指定をそのまま扱う）
+                    currentEdit.oldLines.push(innerRaw.substring(1));
                   }
                 } else if (innerLine.startsWith("+")) {
                   if (currentEdit) {
-                    currentEdit.newLines.push(innerLine.substring(1));
+                    currentEdit.newLines.push(innerRaw.substring(1));
                   }
                 } else if (innerLine.startsWith(" ")) {
                   if (currentEdit) {
-                    const content = innerLine.substring(1);
+                    const content = innerRaw.substring(1);
                     currentEdit.oldLines.push(content);
                     currentEdit.newLines.push(content);
                   }
@@ -552,13 +589,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               for (const edit of edits) {
                 const oldText = edit.oldLines.join('\n');
                 const newText = edit.newLines.join('\n');
-                
+
+                // old 側はファイルの文字（行末コード含む）と完全一致させる（正規化しない）
                 if (!newContent.includes(oldText)) {
                   results.push(`Error: Could not find target text in ${resolvedPatchPath}`);
                   allApplied = false;
                   break;
                 }
-                
+
                 newContent = newContent.replace(oldText, () => newText);
               }
               
@@ -633,16 +671,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             isError: true,
           };
         }
-        
+
         const matchCount = originalContent.split(oldText).length - 1;
-        
+
         if (!replaceAll && matchCount > 1) {
           return {
             content: [{ type: "text", text: `Error: Found ${matchCount} matches for the target text. Set 'replaceAll: true' to replace all, or provide more context in 'oldText' to match only one instance.` }],
             isError: true,
           };
         }
-        
+
         const newContent = replaceAll
           ? originalContent.split(oldText).join(newText)
           : originalContent.replace(oldText, () => newText);
