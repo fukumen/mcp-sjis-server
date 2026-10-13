@@ -133,21 +133,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "ファイル内の一意の文字列を検索し、置換します。" +
                   "REQUIRED PARAMETERS: path, oldText, newText." +
                   "\n\n" +
-                  "注意: oldText はファイル内の文字列をそのまま指定してください" +
-                  "（行末の正規化は行われません）。" +
-                  "CRLF ファイルの場合は oldText にも CRLF を含めて指定する必要があります。" +
-                  "newText は指定した文字のまま書き込まれます（行末コードの変換も行われません）。" +
-                  "複数箇所で一致した場合はエラーになります（replaceAll: true で全置換）。" +
+                  "注意: oldText はファイル内の文字列をそのまま指定してください。" +
+                  "oldText / newText 内の改行コード（CR/LF/CRLF）は文字として扱われ、" +
+                  "行としての制御は行いません（正規化・変換なし）。" +
+                  "複数箇所で一致した場合はエラーになります。" +
+                  "すべて置き換える場合は replaceAll: true、" +
+                  "一部のみ置き換える場合は oldText に前後の文脈を含めてファイル内で一意にしてください。" +
                   "\n\n" +
                   "PATCH MODE (mode='patch'): " +
                   "V4A マルチファイルパッチを適用します。" +
                   "REQUIRED PARAMETERS: mode, patch." +
                   "\n\n" +
-                  "行末コード（CR/LF）は文字の一部として扱われ、変換・正規化されません。" +
-                  "old 側の行にはファイルに実際にある行末コードを含めて指定し、" +
-                  "new 側の行に書いた行末コードがそのまま書き込まれます。" +
-                  "CRLF 行末で書いたパッチは new 側の行も CRLF として書き込まれます。" +
-                  "パッチテキスト自体の行末は LF / CRLF のどちらでも解析できます。" +
+                  "パッチテキストは \\r\\n / \\r / \\n をすべて行区切りとして解析します。" +
+                  "行末コード（CR/LF/CRLF）は hunk 内で自由に混在でき、" +
+                  "書いたとおりに old/new に反映されます（変換・正規化はしません）。" +
                   "@@ 行は各 hunk の開始に必須です（内容はマッチに使用されません）。" +
                   "\n\n" +
                   "注意: PATCH MODE は 'Update File' 操作のみをサポートします。" +
@@ -499,72 +498,89 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           
           const results: string[] = [];
-          const patchLines = patchContent.split('\n');
 
-          type Edit = { oldLines: string[]; newLines: string[]; contextHint: string };
+          type PatchLine = { body: string; ending: string };
+          type Edit = { oldLines: PatchLine[]; newLines: PatchLine[]; contextHint: string };
           type FilePatch = { filePath: string; edits: Edit[] };
 
           const filePatches: FilePatch[] = [];
           let currentFilePatch: FilePatch | null = null;
           let currentEdit: Edit | null = null;
-          let i = 0;
-          
-          // パッチ文書の行末 \r は改行コードの一部（CRLF 行末のパッチに対応）として
-          // 構文解析のために剥く。内容行の \r は文字の一部なので raw からそのまま取り出す。
-          const stripTransportCr = (line: string): string =>
-            line.endsWith("\r") ? line.slice(0, -1) : line;
 
-          while (i < patchLines.length) {
-            const line = stripTransportCr(patchLines[i]);
-            
-            if (line === "*** Begin Patch") {
-              i++;
-              while (i < patchLines.length && stripTransportCr(patchLines[i]) !== "*** End Patch") {
-                const innerRaw = patchLines[i];
-                const innerLine = stripTransportCr(innerRaw);
-                
-                if (innerLine.startsWith("*** Update File: ")) {
-                  if (currentEdit && currentFilePatch) {
-                    currentFilePatch.edits.push(currentEdit);
-                    currentEdit = null;
-                  }
-                  const targetFile = innerLine.substring("*** Update File: ".length).trim();
-                  currentFilePatch = { filePath: targetFile, edits: [] };
-                  filePatches.push(currentFilePatch);
-                } else if (innerLine.startsWith("@@ ")) {
-                  if (currentEdit && currentFilePatch) {
-                    currentFilePatch.edits.push(currentEdit);
-                  }
-                  currentEdit = { oldLines: [], newLines: [], contextHint: innerLine };
-                } else if (innerLine.startsWith("-")) {
-                  if (currentEdit) {
-                    // 行末 \r も文字の一部として保持する（LF/CRLF の指定をそのまま扱う）
-                    currentEdit.oldLines.push(innerRaw.substring(1));
-                  }
-                } else if (innerLine.startsWith("+")) {
-                  if (currentEdit) {
-                    currentEdit.newLines.push(innerRaw.substring(1));
-                  }
-                } else if (innerLine.startsWith(" ")) {
-                  if (currentEdit) {
-                    const content = innerRaw.substring(1);
-                    currentEdit.oldLines.push(content);
-                    currentEdit.newLines.push(content);
-                  }
-                } else if (innerLine === "") {
-                  // Empty lines between hunks are skipped (not part of patch content)
+          // パッチ文字列を「本文 + 行末コード」の列に分解する。
+          // \r\n / \r / \n をすべて行区切りとして認識し、行末コードはその行に書かれた
+          // バイトとしてそのまま保持する（変換・正規化はしない）。
+          // 文字列の末尾に行末コードが無い行は ending が空文字になる
+          // （*** End Patch の後ろの改行は省略可能）。
+          const patchLines: PatchLine[] = [];
+          {
+            const re = /\r\n|\r|\n/g;
+            let last = 0;
+            let m: RegExpExecArray | null;
+            while ((m = re.exec(patchContent)) !== null) {
+              patchLines.push({ body: patchContent.slice(last, m.index), ending: m[0] });
+              last = m.index + m[0].length;
+            }
+            patchLines.push({ body: patchContent.slice(last), ending: "" });
+          }
+
+          // "*** Begin Patch" の前の行と、*** End Patch の後ろ（次の Begin まで）の行は
+          // パッチ本体ではないため読み飛ばす。
+          let inPatch = false;
+          for (const { body, ending } of patchLines) {
+            if (!inPatch) {
+              if (body === "*** Begin Patch") {
+                inPatch = true;
+                if (currentEdit && currentFilePatch) {
+                  currentFilePatch.edits.push(currentEdit);
+                  currentEdit = null;
                 }
-                i++;
               }
-              
+              continue;
+            }
+            if (body === "*** End Patch") {
               if (currentEdit && currentFilePatch) {
                 currentFilePatch.edits.push(currentEdit);
                 currentEdit = null;
               }
-              i++;
-            } else {
-              i++;
+              inPatch = false;
+              continue;
             }
+            if (body.startsWith("*** Update File: ")) {
+              if (currentEdit && currentFilePatch) {
+                currentFilePatch.edits.push(currentEdit);
+                currentEdit = null;
+              }
+              const targetFile = body.substring("*** Update File: ".length).trim();
+              currentFilePatch = { filePath: targetFile, edits: [] };
+              filePatches.push(currentFilePatch);
+            } else if (body.startsWith("@@ ")) {
+              if (currentEdit && currentFilePatch) {
+                currentFilePatch.edits.push(currentEdit);
+                currentEdit = null;
+              }
+              currentEdit = { oldLines: [], newLines: [], contextHint: body };
+            } else if (body.startsWith("-") || body.startsWith("+") || body.startsWith(" ")) {
+              if (currentEdit) {
+                // 書かれた行末コードも含めてそのまま内容にする（as-is）。
+                // 内容に行という概念はなく、old/new は各行を単純連結した文字列になる。
+                const line: PatchLine = { body: body.slice(1), ending };
+                if (body.startsWith("-")) {
+                  currentEdit.oldLines.push(line);
+                } else if (body.startsWith("+")) {
+                  currentEdit.newLines.push(line);
+                } else {
+                  currentEdit.oldLines.push(line);
+                  currentEdit.newLines.push(line);
+                }
+              }
+            }
+            // プレフィックスの無い行（hunk 間の空行など）は読み飛ばす
+          }
+
+          if (currentEdit && currentFilePatch) {
+            currentFilePatch.edits.push(currentEdit);
+            currentEdit = null;
           }
 
           if (filePatches.length === 0) {
@@ -610,13 +626,36 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               let newContent = originalContent;
               let allApplied = true;
               
+              // old/new は「本文 + 書かれた行末コード」の単純連結で組み立てる（行の概念なし）。
+              // ただし各側の最終行の行末コードは hunk の終わりの区切り（構造）として
+              // 内容に含めない。その位置のファイルのバイトは置換範囲の外に保たれるため、
+              // ファイル側の行末コード（CR/LF/CRLF/無し）はそのまま維持される。
+              const joinLines = (lines: PatchLine[]): string =>
+                lines
+                  .map((l, idx) => (idx === lines.length - 1 ? l.body : l.body + l.ending))
+                  .join("");
+
               for (const edit of edits) {
-                const oldText = edit.oldLines.join('\n');
-                const newText = edit.newLines.join('\n');
+                const oldText = joinLines(edit.oldLines);
+                const newText = joinLines(edit.newLines);
+
+                // old 側が空の hunk（+ 行のみ）は挿入位置を特定できないためエラーにする
+                if (oldText === "") {
+                  results.push(`Error: patch hunk has no old lines (context or - lines are required) in ${resolvedPatchPath}`);
+                  allApplied = false;
+                  break;
+                }
 
                 // old 側はファイルの文字（行末コード含む）と完全一致させる（正規化しない）
-                if (!newContent.includes(oldText)) {
+                const matchCount = newContent.split(oldText).length - 1;
+                if (matchCount === 0) {
                   results.push(`Error: Could not find target text in ${resolvedPatchPath}`);
+                  allApplied = false;
+                  break;
+                }
+                // 複数一致は曖昧なためエラーにする（replace モードと同じ規約）
+                if (matchCount > 1) {
+                  results.push(`Error: Found ${matchCount} matches for the target text in ${resolvedPatchPath}. Add more context lines to make the old side unique.`);
                   allApplied = false;
                   break;
                 }

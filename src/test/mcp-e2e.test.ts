@@ -14,8 +14,8 @@ import * as iconv from "iconv-lite";
  * |----------------------------|----|------|----|
  * | replace old（完全一致） | E2E-04 | E2E-04 | E2E-04 |
  * | replace new（そのまま書く） | E2E-04 | E2E-04 | E2E-04 |
- * | patch old（完全一致） | E2E-02 | E2E-03 | E2E-03 |
- * | patch new（そのまま書く） | E2E-02, 03 | E2E-03 | E2E-03 |
+ * | patch old（完全一致） | E2E-02, 08 | E2E-03, 08 | E2E-03, 08 |
+ * | patch new（そのまま書く） | E2E-02, 03, 08 | E2E-03, 08 | E2E-08 |
  * | read（行区切り表示） | E2E-05 | E2E-05 | E2E-05 |
  * | grep（行区切り表示） | E2E-05 | E2E-05 | E2E-05 |
  * | diff（行内容の保持） | UD-01～03 | UD-08 | UD-09 |
@@ -261,14 +261,15 @@ test("[E2E-03] sjis_patch patch モードは行末コードを文字として扱
     assert.match(resLf.result.content[0].text, /Successfully patched/);
     assert.equal(readFileSync(lf, "utf-8"), "C\r\nD\n");
 
-    // old 側の行内の単独 \r で CR-only ファイルに一致する（CR は文字として扱う）
+    // CR-only ファイル: パッチテキスト内の \r も行区切りなので、CR 行末は bare \r で指定する
+    // （"-foo\r-bar" は old 側 "foo\rbar"（CR 行末で区切られた2行）を表す）
     const crPatchFile = join(dir, "cr-patch.txt");
     writeFileSync(crPatchFile, "foo\rbar\rbaz");
     const crPatch =
       "*** Begin Patch\n" +
       `*** Update File: ${crPatchFile}\n` +
       "@@ foo\n" +
-      "-foo\rbar\n" +
+      "-foo\r-bar\n" +
       "+FOO\n" +
       "+BAR\n" +
       "*** End Patch\n";
@@ -508,6 +509,195 @@ test("[E2E-07] sjis_grep の includeExtension は接尾辞一致で拡張子無�
     // 省略時はバイナリ拡張子（png/pdf/zip 等）のみ除外。.bin はリスト外なので対象
     const all = await grep(5, undefined);
     assert.deepEqual(all.sort(), ["Makefile", "a.c", "data.bin", "readme"]);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-08] patch モード: hunk 内の行末コードは混在可能（as-is 連結）", async () => {
+  // パッチ文字列は \r\n / \r / \n をすべて行区切りとして解析され、内容行は
+  // 「プレフィックスの次のバイトから行末コードまで」がそのまま old/new に連結される。
+  // 各側の最終行の行末コードだけは hunk の終わりの区切りとして内容に含めない。
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    // (a) bbbb の行末 CRLF を cccc の行末 LF に置き換える（old/new で行末コードが違う）
+    const f1 = join(dir, "replace-eol.txt");
+    writeFileSync(f1, iconv.encode("aaaa\r\nbbbb\r\ndddd\nffff\n", "shift-jis"));
+    const patch1 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f1}\n` +
+      "@@ hoge\n" +
+      " aaaa\r\n" +
+      "-bbbb\r\n" +
+      "+cccc\n" +
+      " dddd\n" +
+      "*** End Patch\n";
+    const res1 = await request(2, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch1 },
+    });
+    assert.match(res1.result.content[0].text, /Successfully patched/);
+    assert.equal(
+      iconv.decode(readFileSync(f1), "shift-jis"),
+      "aaaa\r\ncccc\ndddd\nffff\n",
+    );
+
+    // (b) bare CR: パッチテキスト内の \r も行区切りなので、CR 行末は bare \r で指定できる
+    const f2 = join(dir, "cr.txt");
+    writeFileSync(f2, "aaaa\rbbbb\rdddd\r");
+    const patch2 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f2}\n` +
+      "@@ hoge\r" +
+      " aaaa\r" +
+      "-bbbb\r" +
+      "+CCCC\r" +
+      " dddd\r" +
+      "*** End Patch\n";
+    const res2 = await request(3, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch2 },
+    });
+    assert.match(res2.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f2, "utf-8"), "aaaa\rCCCC\rdddd\r");
+
+    // (c) 1つの hunk 内で CR / CRLF / LF が混在する
+    const f3 = join(dir, "mixed.txt");
+    writeFileSync(f3, "aaaa\rbbbb\r\ndddd\n");
+    const patch3 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f3}\n` +
+      "@@ hoge\n" +
+      " aaaa\r" +
+      "-bbbb\r\n" +
+      "+CCCC\n" +
+      " dddd\n" +
+      "*** End Patch\n";
+    const res3 = await request(4, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch3 },
+    });
+    assert.match(res3.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f3, "utf-8"), "aaaa\rCCCC\ndddd\n");
+
+    // (d) 最終行がファイル末尾でも、パッチ文字列の末尾に改行が無くても動く
+    const f4 = join(dir, "eof-nonl.txt");
+    writeFileSync(f4, "aaaa\nbbbb\ndddd");
+    const patch4 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f4}\n` +
+      "@@ hoge\n" +
+      " aaaa\n" +
+      "-bbbb\n" +
+      "+CCCC\n" +
+      " dddd\n" +
+      "*** End Patch";
+    const res4 = await request(5, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch4 },
+    });
+    assert.match(res4.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f4, "utf-8"), "aaaa\nCCCC\ndddd");
+
+    // (e) 空の - 行で最終行の行末コードまで消費する（CRLF パッチ）
+    const f5 = join(dir, "consume.txt");
+    writeFileSync(f5, "aaaa\r\nbbbb\r\n");
+    const patch5 =
+      "*** Begin Patch\r\n" +
+      `*** Update File: ${f5}\r\n` +
+      "@@ hoge\r\n" +
+      " aaaa\r\n" +
+      "-bbbb\r\n" +
+      "-\r\n" +
+      "+BBBB\n" +
+      "*** End Patch\r\n";
+    const res5 = await request(6, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch5 },
+    });
+    assert.match(res5.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f5, "utf-8"), "aaaa\r\nBBBB");
+
+    // (f) *** End Patch 自体が無いパッチ文字列も解析できる
+    const f6 = join(dir, "no-end.txt");
+    writeFileSync(f6, "aaaa\nbbbb\n");
+    const patch6 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f6}\n` +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n";
+    const res6 = await request(7, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch6 },
+    });
+    assert.match(res6.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f6, "utf-8"), "aaaa\nBBBB\n");
+
+    // (g) *** End Patch の後ろの行はパッチ本体として扱われない
+    const f7 = join(dir, "after-end.txt");
+    writeFileSync(f7, "aaaa\nbbbb\n");
+    const patch7 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f7}\n` +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n" +
+      `*** Update File: ${f7}\n` +
+      "@@ hoge\n" +
+      "-aaaa\n" +
+      "+AAAA\n" +
+      "*** End Patch\n";
+    const res7 = await request(8, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch7 },
+    });
+    assert.match(res7.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f7, "utf-8"), "aaaa\nBBBB\n");
+
+    // (h) old 側が空の hunk（+ 行のみ）は挿入位置を特定できないためエラー、ファイルは無変更
+    const f8 = join(dir, "add-only.txt");
+    writeFileSync(f8, "aaaa\nbbbb\n");
+    const patch8 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f8}\n` +
+      "@@ hoge\n" +
+      "+INSERTED\n" +
+      "*** End Patch\n";
+    const res8 = await request(9, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch8 },
+    });
+    assert.match(res8.result.content[0].text, /no old lines/);
+    assert.equal(readFileSync(f8, "utf-8"), "aaaa\nbbbb\n");
+
+    // (i) old 側がファイル内に複数一致する場合はエラー、ファイルは無変更
+    const f9 = join(dir, "multi.txt");
+    writeFileSync(f9, "aaaa\nbbbb\naaaa\nbbbb\n");
+    const patch9 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f9}\n` +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res9 = await request(10, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch9 },
+    });
+    assert.match(res9.result.content[0].text, /Found 2 matches/);
+    assert.equal(readFileSync(f9, "utf-8"), "aaaa\nbbbb\naaaa\nbbbb\n");
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });
