@@ -16,10 +16,12 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "diff": "^9.0.0",
     "editorconfig": "^3.0.2",
-    "iconv-lite": "^0.7.2"
+    "iconv-lite": "^0.7.2",
+    "picomatch": "^4.0.7"
   },
   "devDependencies": {
     "@types/node": "^25.5.2",
+    "@types/picomatch": "^4.0.3",
     "ts-node": "^10.9.2",
     "typescript": "^6.0.2"
   }

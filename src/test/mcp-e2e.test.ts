@@ -475,7 +475,7 @@ test("[E2E-06] sjis_grep は正規表現で一致しないときリテラル一�
   }
 });
 
-test("[E2E-07] sjis_grep の includeExtension は接尾辞一致で拡張子無しファイルも指定できる", async () => {
+test("[E2E-07] sjis_grep の includeGlob はファイル名のglobで拡張子無しファイルも絞り込める", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
   const { child, request, notify } = startServer();
   try {
@@ -494,18 +494,19 @@ test("[E2E-07] sjis_grep の includeExtension は接尾辞一致で拡張子無�
     writeFileSync(join(sub, "readme"), "needle readme\n");
     writeFileSync(join(sub, "data.bin"), "needle bin\n");
 
-    const grep = async (id: number, includeExtension?: string) => {
+    const grep = async (id: number, includeGlob?: string) => {
       const args: Record<string, unknown> = { pattern: "needle", path: sub };
-      if (includeExtension !== undefined) args.includeExtension = includeExtension;
+      if (includeGlob !== undefined) args.includeGlob = includeGlob;
       const res = await request(id, "tools/call", { name: "sjis_grep", arguments: args });
       return [...res.result.content[0].text.matchAll(/files[/\\]([^\s:]+)/g)].map((m: RegExpMatchArray) => m[1]);
     };
 
-    // 接尾辞一致: ドット付き拡張子は拡張子を持つファイルだけに一致する
-    assert.deepEqual(await grep(2, ".c"), ["a.c"]);
-    // ファイル名やその一部を指定すれば拡張子の無いファイルも検索できる
-    assert.deepEqual(await grep(3, "akefile"), ["Makefile"]);
-    assert.deepEqual((await grep(4, ".c,readme")).sort(), ["a.c", "readme"]);
+    // 拡張子のglobは拡張子を持つファイルだけに一致する
+    assert.deepEqual(await grep(2, "*.c"), ["a.c"]);
+    // 拡張子の無いファイルもファイル名で指定できる
+    assert.deepEqual(await grep(3, "Makefile"), ["Makefile"]);
+    // ブレース展開で複数パターンを指定できる
+    assert.deepEqual((await grep(4, "{a.c,readme}")).sort(), ["a.c", "readme"]);
     // 省略時はバイナリ拡張子（png/pdf/zip 等）のみ除外。.bin はリスト外なので対象
     const all = await grep(5, undefined);
     assert.deepEqual(all.sort(), ["Makefile", "a.c", "data.bin", "readme"]);
@@ -698,6 +699,72 @@ test("[E2E-08] patch モード: hunk 内の行末コードは混在可能（as-i
     });
     assert.match(res9.result.content[0].text, /Found 2 matches/);
     assert.equal(readFileSync(f9, "utf-8"), "aaaa\nbbbb\naaaa\nbbbb\n");
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-09] sjis_grep の files_only と context/limit/offset によるページング", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    const sub = join(dir, "files");
+    mkdirSync(sub);
+    writeFileSync(join(sub, "a.txt"), "needle A\nline2\nline3\nline4\nneedle B\n");
+    writeFileSync(join(sub, "b.txt"), "needle C\n");
+
+    const call = async (id: number, extraArgs: Record<string, unknown>) => {
+      const res = await request(id, "tools/call", {
+        name: "sjis_grep",
+        arguments: { pattern: "needle", path: sub, ...extraArgs },
+      });
+      return res.result.content[0].text as string;
+    };
+
+    // files_only: マッチしたファイルパスの一覧のみ返す（マッチ行の内容は含まれない）
+    const filesOut = await call(2, { outputMode: "files_only" });
+    assert.match(filesOut, /Found 2 file\(s\) with matches:/);
+    assert.match(filesOut, /files[/\\]a\.txt/);
+    assert.match(filesOut, /files[/\\]b\.txt/);
+    assert.doesNotMatch(filesOut, /needle [ABC]/);
+
+    // files_only + offset/limit: ファイル単位のページング
+    const filesPaged = await call(3, { outputMode: "files_only", offset: 1, limit: 1 });
+    assert.match(filesPaged, /Found 2 file\(s\) with matches \(showing 2\.\.2\):/);
+    assert.doesNotMatch(filesPaged, /files[/\\]a\.txt/);
+    assert.match(filesPaged, /files[/\\]b\.txt/);
+
+    // context=1: マッチ行の前後1行を含む。離れたマッチは `--` 区切りでブロックが分かれる
+    const ctx = await call(4, { context: 1 });
+    assert.match(ctx, /Found 3 matches:/);
+    assert.match(ctx, /Line 1: needle A/);
+    assert.match(ctx, /Line 2: line2/);
+    assert.match(ctx, /  --\n  Line 4: line4/);
+    assert.match(ctx, /Line 5: needle B/);
+    assert.doesNotMatch(ctx, /Line 3: line3/);
+
+    // limit/offset: マッチ単位のページング。総件数はヘッダに含まれる
+    const paged1 = await call(5, { limit: 2 });
+    assert.match(paged1, /Found 3 matches \(showing 1\.\.2\):/);
+    assert.match(paged1, /needle A/);
+    assert.match(paged1, /needle B/);
+    assert.doesNotMatch(paged1, /needle C/);
+    const paged2 = await call(6, { limit: 2, offset: 2 });
+    assert.match(paged2, /Found 3 matches \(showing 3\.\.3\):/);
+    assert.match(paged2, /needle C/);
+    assert.doesNotMatch(paged2, /needle A/);
+
+    // 全件表示のときは showing を含まない
+    assert.match(await call(7, {}), /Found 3 matches:\n/);
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });

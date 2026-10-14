@@ -15,6 +15,7 @@ import {
   readFileWithCharset,
 } from "./charset-detector.js";
 import * as iconv from "iconv-lite";
+import picomatch from "picomatch";
 import { buildUnifiedDiff } from "./unified-diff.js";
 
 class Mutex {
@@ -175,11 +176,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "Shift JIS/CP932 エンコーディングのファイルやディレクトリから、" +
                   "指定した正規表現パターン（JavaScript/ECMAScript準拠）を検索します。" +
                   "terminal の grep/rg/find の代わりに使用してください。" +
-                  ".git ディレクトリとバイナリファイルは自動的に除外されます。" +
-                  "検索結果は最大100件まで返されます。" +
-                  "includeExtension でファイル名の接尾辞（カンマ区切り、例: '.c,.txt'）に検索対象を絞り込めます。" +
-                  "接尾辞一致のため、拡張子の無いファイルはファイル名やその一部（例: 'Makefile'）を指定すれば検索できます。" +
-                  "省略時はバイナリ形式（png/pdf/zip 等）のみ除外し、指定時はこの除外を無視して接尾辞に一致するファイルのみを検索します。" +
+                  "includeGlob でファイル名のglobパターン（例: '*.ts', 'README*.{md,txt}'）に検索対象を絞り込めます。" +
+                  ".git ディレクトリは常に除外されます。glob 未指定時はバイナリ形式（png/pdf/zip 等）のファイルも除外します。" +
+                  "\n\n" +
+                  "outputMode に 'files_only' を指定するとマッチしたファイルパスの一覧のみを返します。" +
+                  "context でマッチ行の前後に含める行数を指定できます（content モードのみ有効）。" +
+                  "limit と offset で結果をページングできます（limit のデフォルトは100、content モードではマッチ行数、files_only ではファイル数を数えます）。" +
                   "\n\n" +
                   "注意: 検索結果の行末コード（CRLF/LF/CR）は元のファイルのままです。" +
                   "マッチ行は行頭の空白も含め元の行のまま返します。" +
@@ -190,7 +192,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
           properties: {
             pattern: { type: "string", description: "検索する正規表現パターン（JavaScript準拠）" },
             path: { type: "string", description: "検索対象のディレクトリまたはファイルの絶対パス" },
-            includeExtension: { type: "string", description: "検索対象とするファイル名の接尾辞（カンマ区切り、例: '.c,.txt'）" },
+            includeGlob: { type: "string", description: "検索対象とするファイル名のglobパターン（例: '*.ts', 'README*.{md,txt}'）" },
+            outputMode: { type: "string", description: "出力形式: 'content'（マッチ行と行番号、デフォルト）または 'files_only'（マッチしたファイルパスの一覧）" },
+            context: { type: "number", description: "マッチ行の前後に含める行数（content モードのみ有効、デフォルト: 0）" },
+            limit: { type: "number", description: "返す結果の最大件数（content: マッチ行数、files_only: ファイル数、デフォルト: 100）" },
+            offset: { type: "number", description: "スキップする件数（デフォルト: 0）" },
             ignoreCase: { type: "boolean", description: "大文字小文字を区別するかどうか（デフォルト: false）" },
           },
           required: ["pattern", "path"],
@@ -322,7 +328,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "sjis_grep": {
-        const allowedKeys = ["pattern", "path", "includeExtension", "ignoreCase"];
+        const allowedKeys = ["pattern", "path", "includeGlob", "outputMode", "context", "limit", "offset", "ignoreCase"];
         const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
         if (unknownKeys.length > 0) {
           return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_grep: ${unknownKeys.join(", ")}` }], isError: true };
@@ -332,9 +338,30 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         const pattern = String(args.pattern);
         const dirPath = String(args.path);
-        const includeExt = args.includeExtension ? String(args.includeExtension) : "";
+        const includeGlob = args.includeGlob !== undefined && String(args.includeGlob).trim().length > 0 ? String(args.includeGlob).trim() : "";
+        const outputMode = args.outputMode !== undefined ? String(args.outputMode) : "content";
         const ignoreCase = args.ignoreCase === true;
-        
+        if (outputMode !== "content" && outputMode !== "files_only") {
+          return { content: [{ type: "text", text: `Error: outputMode must be 'content' or 'files_only': ${outputMode}` }], isError: true };
+        }
+        const parseCount = (name: string, value: unknown, min: number, defaultValue: number): number | null => {
+          if (value === undefined) return defaultValue;
+          if (typeof value !== "number" || !Number.isInteger(value) || value < min) return null;
+          return value;
+        };
+        const contextArg = parseCount("context", args.context, 0, 0);
+        if (contextArg === null) {
+          return { content: [{ type: "text", text: "Error: context must be an integer >= 0." }], isError: true };
+        }
+        const limitArg = parseCount("limit", args.limit, 1, 100);
+        if (limitArg === null) {
+          return { content: [{ type: "text", text: "Error: limit must be an integer >= 1." }], isError: true };
+        }
+        const offsetArg = parseCount("offset", args.offset, 0, 0);
+        if (offsetArg === null) {
+          return { content: [{ type: "text", text: "Error: offset must be an integer >= 0." }], isError: true };
+        }
+
         if (!isAbsolute(dirPath)) {
           return {
             content: [{ type: "text", text: absolutePathErrorMessage("path", dirPath) }],
@@ -347,133 +374,175 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const IGNORED_DIRS = new Set([".git"]);
-        const exts = includeExt.split(',').map(e => e.trim().toLowerCase()).filter(e => e.length > 0);
-        
-        const MAX_MATCHES = 100;
         const MAX_LINE_LENGTH = 2000;
-        
-        let totalMatches = 0;
-        let groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
-        
-        let matchLineFn: (line: string) => boolean;
         let regex: RegExp;
         try {
           regex = new RegExp(pattern, ignoreCase ? 'gi' : 'g');
         } catch (e: any) {
           return { content: [{ type: "text", text: `Error: Invalid RegExp pattern: ${e.message}` }], isError: true };
         }
-        
-        const searchFile = (filePath: string, fileName: string) => {
-          if (exts.length > 0) {
-            const lowerName = fileName.toLowerCase();
-            if (!exts.some(ext => lowerName.endsWith(ext))) return;
-          } else {
-            const lowerName = fileName.toLowerCase();
-            if (lowerName.match(/\.(png|jpg|jpeg|gif|ico|pdf|zip|tar|gz|exe|dll|db|sqlite|sqlite3|class|jar|webp)$/)) return;
-          }
-          
-          try {
-            const buffer = readFileSync(filePath);
-            const charset = detectCharsetFromContent(buffer);
-            let content = "";
-            if (charset === "shift-jis") {
-              content = iconv.decode(buffer, "cp932");
-            } else {
-              content = buffer.toString("utf-8");
-            }
-            
-            const lines = splitDisplayLines(content);
-            const fileMatches: { lineNum: number; text: string }[] = [];
-            
-            for (let i = 0; i < lines.length; i++) {
-              if (totalMatches >= MAX_MATCHES) break;
-              const line = lines[i];
-              if (matchLineFn(line)) {
-                // 行末コード（\r）も元のデータの一部としてそのまま返す
-                let matchLine = line;
-                if (matchLine.length > MAX_LINE_LENGTH) {
-                  matchLine = matchLine.substring(0, MAX_LINE_LENGTH) + "...";
-                }
-                fileMatches.push({ lineNum: i + 1, text: matchLine });
-                totalMatches++;
-              }
-            }
-            
-            if (fileMatches.length > 0) {
-              groupedResults.set(filePath, { charset, matches: fileMatches });
-            }
-          } catch (e) {
-            // ignore read error
-          }
-        };
 
-        const walk = (targetPath: string) => {
-          if (totalMatches >= MAX_MATCHES) return;
+        let isGlobMatch: ((name: string) => boolean) | null = null;
+        if (includeGlob) {
+          try {
+            isGlobMatch = picomatch(includeGlob);
+          } catch (e: any) {
+            return { content: [{ type: "text", text: `Error: Invalid glob pattern: ${e.message}` }], isError: true };
+          }
+        }
+
+        // 対象ファイルを収集してソートする（offset/limit によるページングの結果を決定的にするため）
+        const targetFiles: string[] = [];
+        const collect = (targetPath: string) => {
           try {
             const stat = statSync(targetPath);
             if (stat.isFile()) {
-              searchFile(targetPath, targetPath.split(/[\\/]/).pop() || "");
+              const fileName = targetPath.split(/[\\/]/).pop() || "";
+              if (isGlobMatch) {
+                if (isGlobMatch(fileName)) targetFiles.push(targetPath);
+              } else {
+                // glob 未指定時はバイナリ形式のみ除外する
+                if (!/\.(png|jpg|jpeg|gif|ico|pdf|zip|tar|gz|exe|dll|db|sqlite|sqlite3|class|jar|webp)$/i.test(fileName)) targetFiles.push(targetPath);
+              }
             } else if (stat.isDirectory()) {
-              const files = readdirSync(targetPath);
-              for (const file of files) {
-                if (totalMatches >= MAX_MATCHES) break;
+              for (const file of readdirSync(targetPath)) {
                 if (IGNORED_DIRS.has(file)) continue;
-                
-                const fullPath = join(targetPath, file);
-                try {
-                  const s = statSync(fullPath);
-                  if (s.isDirectory()) {
-                    walk(fullPath);
-                  } else if (s.isFile()) {
-                    searchFile(fullPath, file);
-                  }
-                } catch (e) { continue; }
+                collect(join(targetPath, file));
               }
             }
-          } catch (e) {
+          } catch {
             // ignore
           }
         };
+        collect(resolvedDirPath);
+        targetFiles.sort();
 
-        matchLineFn = (line: string) => {
+        const readDecodedLines = (filePath: string): { charset: string; lines: string[] } | null => {
+          try {
+            const buffer = readFileSync(filePath);
+            const charset = detectCharsetFromContent(buffer);
+            const content = charset === "shift-jis" ? iconv.decode(buffer, "cp932") : buffer.toString("utf-8");
+            return { charset, lines: splitDisplayLines(content) };
+          } catch {
+            return null;
+          }
+        };
+
+        type GrepMatch = { filePath: string; charset: string; lineNum: number; text: string };
+        const allMatches: GrepMatch[] = [];
+        const matchLineFn = (line: string) => {
           regex.lastIndex = 0;
           return regex.test(line);
         };
-        walk(resolvedDirPath);
+        for (const filePath of targetFiles) {
+          const data = readDecodedLines(filePath);
+          if (!data) continue;
+          for (let i = 0; i < data.lines.length; i++) {
+            // 行末コード（\r）も元のデータの一部としてそのまま保持する
+            if (matchLineFn(data.lines[i])) {
+              allMatches.push({ filePath, charset: data.charset, lineNum: i + 1, text: data.lines[i] });
+            }
+          }
+        }
 
-        if (totalMatches === 0) {
+        if (allMatches.length === 0) {
           // パターンにメタ文字が含まれて正規表現として 0 件のとき、
           // リテラル一致が存在すればその件数をヒントとして返す
           if (/[.*+?^${}()|[\]\\]/.test(pattern)) {
-            totalMatches = 0;
-            groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
-            matchLineFn = (line: string) => line.includes(pattern);
-            walk(resolvedDirPath);
-            if (totalMatches > 0) {
+            let literalCount = 0;
+            let literalFiles = 0;
+            for (const filePath of targetFiles) {
+              const data = readDecodedLines(filePath);
+              if (!data) continue;
+              let fileCount = 0;
+              for (const line of data.lines) {
+                if (line.includes(pattern)) fileCount++;
+              }
+              if (fileCount > 0) {
+                literalCount += fileCount;
+                literalFiles++;
+              }
+            }
+            if (literalCount > 0) {
               const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
               return {
                 content: [{
                   type: "text",
-                  text: `No regex matches found. The pattern contains regex metacharacters; ${totalMatches} literal match(es) in ${groupedResults.size} file(s). To search literally, escape them: ${escaped}`,
+                  text: `No regex matches found. The pattern contains regex metacharacters; ${literalCount} literal match(es) in ${literalFiles} file(s). To search literally, escape them: ${escaped}`,
                 }],
               };
             }
           }
           return { content: [{ type: "text", text: "No matches found." }] };
         }
-        
+
+        const clipLine = (line: string) => {
+          if (line.length > MAX_LINE_LENGTH) {
+            return line.substring(0, MAX_LINE_LENGTH) + "...";
+          }
+          return line;
+        };
+        const matchedFileSet = new Set(allMatches.map(m => m.filePath));
+        const matchedFiles = targetFiles.filter(f => matchedFileSet.has(f));
         const outputLines: string[] = [];
-        outputLines.push(`Found ${totalMatches} matches${totalMatches >= MAX_MATCHES ? ` (showing first ${MAX_MATCHES})` : ''}:`);
+
+        if (outputMode === "files_only") {
+          const shown = matchedFiles.slice(offsetArg, offsetArg + limitArg);
+          outputLines.push(`Found ${matchedFiles.length} file(s) with matches${offsetArg > 0 || matchedFiles.length > shown.length ? ` (showing ${offsetArg + 1}..${offsetArg + shown.length})` : ''}:`);
+          outputLines.push("");
+          for (const filePath of shown) {
+            outputLines.push(filePath);
+          }
+          return { content: [{ type: "text", text: outputLines.join('\n') }] };
+        }
+
+        const paged = allMatches.slice(offsetArg, offsetArg + limitArg);
+
+        // ファイルごとにグループ化
+        const groupedResults = new Map<string, { charset: string; matches: { lineNum: number; text: string }[] }>();
+        for (const m of paged) {
+          let g = groupedResults.get(m.filePath);
+          if (!g) {
+            g = { charset: m.charset, matches: [] };
+            groupedResults.set(m.filePath, g);
+          }
+          g.matches.push({ lineNum: m.lineNum, text: m.text });
+        }
+
+        outputLines.push(`Found ${allMatches.length} matches${offsetArg > 0 || allMatches.length > paged.length ? ` (showing ${offsetArg + 1}..${offsetArg + paged.length})` : ''}:`);
         outputLines.push("");
-        
+
         for (const [filePath, result] of groupedResults.entries()) {
           outputLines.push(`${filePath} (Charset: ${result.charset}):`);
-          for (const match of result.matches) {
-            outputLines.push(`  Line ${match.lineNum}: ${match.text}`);
+          const data = contextArg > 0 ? readDecodedLines(filePath) : null;
+          if (contextArg > 0 && data) {
+            // マッチ行の前後 contextArg 行を含めた範囲を作る（重複・隣接する範囲はマージ）
+            const ranges: { start: number; end: number }[] = [];
+            for (const m of result.matches) {
+              const start = Math.max(1, m.lineNum - contextArg);
+              const end = Math.min(data.lines.length, m.lineNum + contextArg);
+              const last = ranges[ranges.length - 1];
+              if (last && start <= last.end + 1) {
+                last.end = Math.max(last.end, end);
+              } else {
+                ranges.push({ start, end });
+              }
+            }
+            for (let ri = 0; ri < ranges.length; ri++) {
+              if (ri > 0) outputLines.push("  --");
+              for (let ln = ranges[ri].start; ln <= ranges[ri].end; ln++) {
+                outputLines.push(`  Line ${ln}: ${clipLine(data.lines[ln - 1])}`);
+              }
+            }
+          } else {
+            // context 未指定、または context 指定時に再読み込みできなかったファイルはマッチ行のみ返す
+            for (const match of result.matches) {
+              outputLines.push(`  Line ${match.lineNum}: ${clipLine(match.text)}`);
+            }
           }
           outputLines.push("");
         }
-        
+
         // 末尾の trim() をしない（最終マッチ行の行末 \r を元のデータのまま返すため）
         return { content: [{ type: "text", text: outputLines.join('\n') }] };
       }
