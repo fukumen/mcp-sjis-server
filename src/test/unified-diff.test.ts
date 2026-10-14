@@ -61,7 +61,7 @@ test("[UD-05] 行数0は ',0' を省略しない", () => {
   assert.ok(diff.includes("+bar"));
 });
 
-test("[UD-06] 末尾改行なしは \\ No newline at end of file を出す", () => {
+test("[UD-06] 末尾の行末コードなしは \\ No newline at end of file を出す", () => {
   const diff = buildUnifiedDiff("/tmp/e.txt", "foo\nbar", "foo\nbaz");
   assert.ok(diff.includes("\\ No newline at end of file"));
 });

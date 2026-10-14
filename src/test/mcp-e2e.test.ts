@@ -590,7 +590,7 @@ test("[E2E-08] patch モード: hunk 内の行末コードは混在可能（as-i
     assert.match(res3.result.content[0].text, /Successfully patched/);
     assert.equal(readFileSync(f3, "utf-8"), "aaaa\rCCCC\ndddd\n");
 
-    // (d) 最終行がファイル末尾でも、パッチ文字列の末尾に改行が無くても動く
+    // (d) 最終行がファイル末尾でも、パッチ文字列の末尾に行末コードが無くても動く
     const f4 = join(dir, "eof-nonl.txt");
     writeFileSync(f4, "aaaa\nbbbb\ndddd");
     const patch4 =

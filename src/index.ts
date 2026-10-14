@@ -47,7 +47,7 @@ function absolutePathErrorMessage(argName: string, value: string): string {
   return `Error: ${argName} must be an absolute path (got relative: "${value}"). Relative paths are resolved against the MCP server's own working directory, not the agent's. Use an absolute path.`;
 }
 
-// \r\n / \r / \n を等しい改行（行区切り）として行に分割する（表示用）。
+// \r\n / \r / \n を等しい行末コード（行区切り）として行に分割する（表示用）。
 // 行番号や検索の行区切りにのみ使用し、マッチングには使わない。
 // 行末の \n はリスト表示の区切り文字として行内容から除くが、
 // \r はデータとして行末に保持する（CRLF ファイルの各行は \r で終わる）。
@@ -90,8 +90,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "1行2000文字を超える場合は切り詰められます。" +
                   "画像やその他のバイナリファイルの読み込みには対応していません。" +
                   "\n\n" +
-                  "注意: ファイルの行末（CRLF / LF / CR）はそのまま出力されます。" +
-                  "読み込んだ内容を編集する際は、元の行末を維持するよう正しく指定してください。",
+                  "注意: ファイルの行末コード（CRLF/LF/CR）はそのまま出力されます。" +
+                  "読み込んだ内容を編集する際は、元の行末コードを維持するよう正しく指定してください。",
         inputSchema: {
           type: "object",
           properties: {
@@ -110,8 +110,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "ファイルの内容を完全に上書きします — 部分的な編集には sjis_patch を使用してください。" +
                   "既存ファイルは検出された文字コードのまま上書きし、新規ファイルは Shift JIS で書き込みます。" +
                   "\n\n" +
-                  "注意: content に指定した行末（CRLF / LF / CR）はそのままファイルに書き込まれます。" +
-                  "既存ファイルの行末を維持する場合は、読み込んだ内容の行末をそのまま使用してください。",
+                  "注意: content に指定した行末コード（CRLF/LF/CR）はそのままファイルに書き込まれます。" +
+                  "既存ファイルの行末コードを維持する場合は、読み込んだ内容の行末コードをそのまま使用してください。",
         inputSchema: {
           type: "object",
           properties: {
@@ -134,7 +134,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "REQUIRED PARAMETERS: path, oldText, newText." +
                   "\n\n" +
                   "注意: oldText はファイル内の文字列をそのまま指定してください。" +
-                  "oldText / newText 内の改行コード（CR/LF/CRLF）は文字として扱われ、" +
+                  "oldText / newText 内の行末コード（CR/LF/CRLF）は文字として扱われ、" +
                   "行としての制御は行いません（正規化・変換なし）。" +
                   "複数箇所で一致した場合はエラーになります。" +
                   "すべて置き換える場合は replaceAll: true、" +
@@ -144,8 +144,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "V4A マルチファイルパッチを適用します。" +
                   "REQUIRED PARAMETERS: mode, patch." +
                   "\n\n" +
-                  "パッチテキストは \\r\\n / \\r / \\n をすべて行区切りとして解析します。" +
-                  "行末コード（CR/LF/CRLF）は hunk 内で自由に混在でき、" +
+                  "hunk 内の行末コード（CR/LF/CRLF）は行の区切りとして機能し、自由に混在できます。" +
                   "書いたとおりに old/new に反映されます（変換・正規化はしません）。" +
                   "@@ 行は各 hunk の開始に必須です（内容はマッチに使用されません）。" +
                   "\n\n" +
@@ -182,7 +181,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "接尾辞一致のため、拡張子の無いファイルはファイル名やその一部（例: 'Makefile'）を指定すれば検索できます。" +
                   "省略時はバイナリ形式（png/pdf/zip 等）のみ除外し、指定時はこの除外を無視して接尾辞に一致するファイルのみを検索します。" +
                   "\n\n" +
-                  "注意: 検索結果の行末（CRLF/LF/CR）は元のファイルのままです。" +
+                  "注意: 検索結果の行末コード（CRLF/LF/CR）は元のファイルのままです。" +
                   "マッチ行は行頭の空白も含め元の行のまま返します。" +
                   "正規表現として一致しない場合、パターンにメタ文字が含まれていればリテラル一致の件数をヒントとして返します。" +
                   "行が2000文字を超える場合は切り詰められます。",
@@ -511,7 +510,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           // \r\n / \r / \n をすべて行区切りとして認識し、行末コードはその行に書かれた
           // バイトとしてそのまま保持する（変換・正規化はしない）。
           // 文字列の末尾に行末コードが無い行は ending が空文字になる
-          // （*** End Patch の後ろの改行は省略可能）。
+          // （*** End Patch の後ろの行末コードは省略可能）。
           const patchLines: PatchLine[] = [];
           {
             const re = /\r\n|\r|\n/g;
