@@ -147,7 +147,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                   "\n\n" +
                   "hunk 内の行末コード（CR/LF/CRLF）は行の区切りとして機能し、自由に混在できます。" +
                   "書いたとおりに old/new に反映されます（変換・正規化はしません）。" +
-                  "@@ 行は各 hunk の開始に必須です（内容はマッチに使用されません）。" +
+                  "@@ 行は hunk の開始を示すマーカーです（省略可能。内容はマッチに使用されません）。" +
                   "\n\n" +
                   "注意: PATCH MODE は 'Update File' 操作のみをサポートします。" +
                   "'Add File', 'Delete File', 'Move File' は未対応です。",
@@ -223,7 +223,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const resolvedPath = filePath;
 
   let release: (() => void) | undefined;
-  if (resolvedPath && (name === "sjis_read" || name === "sjis_write" || name === "sjis_patch")) {
+  // patch モードはパッチ内の各ファイルに対して個別にロックを取得するため、
+  // args.path のロックを先に取得すると同一ファイルが対象のときにデッドロックする
+  const isPatchMode = name === "sjis_patch" && String(args.mode || "replace") === "patch";
+  if (
+    resolvedPath &&
+    !isPatchMode &&
+    (name === "sjis_read" || name === "sjis_write" || name === "sjis_patch")
+  ) {
     const mutex = getFileMutex(resolvedPath);
     release = await mutex.acquire();
   }
@@ -314,6 +321,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const unknownKeys = Object.keys(args).filter(k => !allowedKeys.includes(k));
         if (unknownKeys.length > 0) {
           return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_write: ${unknownKeys.join(", ")}` }], isError: true };
+        }
+        if (typeof args.content !== "string") {
+          // String(undefined) が "undefined" という文字列として書き込まれる事故を防ぐ
+          return { content: [{ type: "text", text: "Error: content parameter is required for sjis_write." }], isError: true };
         }
         const contentToWrite = String(args.content);
         const fileExists = existsSync(resolvedPath);
@@ -554,6 +565,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           return { content: [{ type: "text", text: `Error: Unknown argument(s) for sjis_patch: ${unknownKeys.join(", ")}` }], isError: true };
         }
         const mode = String(args.mode || "replace");
+        if (mode !== "replace" && mode !== "patch") {
+          return {
+            content: [{ type: "text", text: `Error: mode must be 'replace' or 'patch' (got "${mode}").` }],
+            isError: true,
+          };
+        }
         
         if (mode === "patch") {
           // PATCH MODE: Apply V4A multi-file patches
@@ -566,6 +583,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           }
           
           const results: string[] = [];
+          const parseErrors: string[] = [];
 
           type PatchLine = { body: string; ending: string };
           type Edit = { oldLines: PatchLine[]; newLines: PatchLine[]; contextHint: string };
@@ -574,6 +592,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           const filePatches: FilePatch[] = [];
           let currentFilePatch: FilePatch | null = null;
           let currentEdit: Edit | null = null;
+
+          // エラーメッセージ用にパッチ行を引用する（長い行は切り詰める）
+          const quoteLine = (line: string): string =>
+            `"${line.length > 100 ? line.slice(0, 100) + "..." : line}"`;
 
           // パッチ文字列を「本文 + 行末コード」の列に分解する。
           // \r\n / \r / \n をすべて行区切りとして認識し、行末コードはその行に書かれた
@@ -620,16 +642,50 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
                 currentEdit = null;
               }
               const targetFile = body.substring("*** Update File: ".length).trim();
-              currentFilePatch = { filePath: targetFile, edits: [] };
-              filePatches.push(currentFilePatch);
-            } else if (body.startsWith("@@ ")) {
-              if (currentEdit && currentFilePatch) {
+              if (!targetFile) {
+                parseErrors.push("Error: *** Update File: has an empty file path.");
+                currentFilePatch = null;
+              } else {
+                currentFilePatch = { filePath: targetFile, edits: [] };
+                filePatches.push(currentFilePatch);
+              }
+            } else if (body.startsWith("@@")) {
+              // 連続する @@ 行（V4A の文脈チェーン: "@@ class A" → "@@ def m"）は同一 hunk の
+              // 開始として扱うため、行を持たない edit は flush せず保持する
+              if (
+                currentEdit &&
+                currentFilePatch &&
+                (currentEdit.oldLines.length > 0 || currentEdit.newLines.length > 0)
+              ) {
                 currentFilePatch.edits.push(currentEdit);
                 currentEdit = null;
               }
-              currentEdit = { oldLines: [], newLines: [], contextHint: body };
+              if (!currentFilePatch) {
+                parseErrors.push(
+                  `Error: @@ hunk header before any *** Update File: line: ${quoteLine(body)}. ` +
+                    `Move the @@ line after the "*** Update File: <path>" line it belongs to.`,
+                );
+              } else if (!currentEdit) {
+                currentEdit = { oldLines: [], newLines: [], contextHint: body };
+              }
+            } else if (body.startsWith("***")) {
+              // 未対応のディレクティブ（Add File / Delete File / Move to / End of File など）を
+              // 読み飛ばすと、その後ろの +/- 行が直前の hunk に混入してしまうためエラーにする
+              parseErrors.push(
+                `Error: unsupported patch directive: ${quoteLine(body)}. ` +
+                  `Only '*** Update File:' is supported; create or delete files with sjis_write instead.`,
+              );
             } else if (body.startsWith("-") || body.startsWith("+") || body.startsWith(" ")) {
-              if (currentEdit) {
+              if (!currentFilePatch) {
+                parseErrors.push(
+                  `Error: change line outside of any *** Update File: section: ${quoteLine(body)}. ` +
+                    `Change lines (" ", "-", "+") must come after a "*** Update File: <path>" line inside the patch.`,
+                );
+              } else {
+                if (!currentEdit) {
+                  // V4A では @@ は hunk の必須要素ではない（change 行で hunk を開始できる）
+                  currentEdit = { oldLines: [], newLines: [], contextHint: "" };
+                }
                 // 書かれた行末コードも含めてそのまま内容にする（as-is）。
                 // 内容に行という概念はなく、old/new は各行を単純連結した文字列になる。
                 const line: PatchLine = { body: body.slice(1), ending };
@@ -651,16 +707,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             currentEdit = null;
           }
 
-          if (filePatches.length === 0) {
+          // 構造的に壊れたパッチは 1 ファイルも適用せずエラーで返す
+          if (parseErrors.length > 0) {
             return {
-              content: [{ type: "text", text: "Error: No valid patches found in patch parameter." }],
+              content: [{ type: "text", text: parseErrors.join("\n\n") }],
+              isError: true,
+            };
+          }
+
+          if (filePatches.length === 0) {
+            // Begin 自体の書き忘れは最も一般的なミスのため、原因をヒントとして示す
+            const hasBegin = patchLines.some((l) => l.body === "*** Begin Patch");
+            const hint = hasBegin
+              ? "The patch contains no '*** Update File:' sections."
+              : "The patch must start with a '*** Begin Patch' line.";
+            return {
+              content: [{ type: "text", text: `Error: No valid patches found in patch parameter. ${hint}` }],
               isError: true,
             };
           }
 
           for (const filePatch of filePatches) {
             const { filePath: targetFile, edits } = filePatch;
-            if (!targetFile || edits.length === 0) continue;
+            if (edits.length === 0) {
+              // hunk の無い Update File をサイレントにスキップして成功扱いにしない
+              results.push(`Error: no hunks found for ${targetFile}. A hunk is an optional @@ line followed by at least one context/-/+ line.`);
+              continue;
+            }
 
             let patchFileRelease: (() => void) | undefined;
             try {
@@ -746,12 +819,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             }
           }
           
+          // 1 つでもファイルの適用に失敗していれば isError を付ける
           return {
             content: [{ type: "text", text: results.join('\n\n') }],
+            isError: results.some((r) => r.startsWith("Error")),
           };
         }
         
         // REPLACE MODE: find and replace text (as-is, no line ending normalization)
+        if (args.patch !== undefined) {
+          return {
+            content: [{ type: "text", text: "Error: the patch parameter is only valid when mode='patch'." }],
+            isError: true,
+          };
+        }
+        if (typeof args.oldText !== "string" || typeof args.newText !== "string") {
+          // String(undefined) が "undefined" という文字列として置換される事故を防ぐ
+          return {
+            content: [{ type: "text", text: "Error: oldText and newText are required for replace mode." }],
+            isError: true,
+          };
+        }
         const oldText = String(args.oldText);
         const newText = String(args.newText);
         const replaceAll = args.replaceAll === true;

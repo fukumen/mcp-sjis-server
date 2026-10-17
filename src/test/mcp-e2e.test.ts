@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as iconv from "iconv-lite";
@@ -16,6 +16,8 @@ import * as iconv from "iconv-lite";
  * | replace new（そのまま書く） | E2E-04 | E2E-04 | E2E-04 |
  * | patch old（完全一致） | E2E-02, 08 | E2E-03, 08 | E2E-03, 08 |
  * | patch new（そのまま書く） | E2E-02, 03, 08 | E2E-03, 08 | E2E-08 |
+ * | patch old（@@ 省略 hunk） | E2E-10(a)(i) | E2E-10(i) | E2E-10(j) |
+ * | patch new（@@ 省略 hunk） | E2E-10(a)(i) | E2E-10(i) | E2E-10(j) |
  * | read（行区切り表示） | E2E-05 | E2E-05 | E2E-05 |
  * | grep（行区切り表示） | E2E-05 | E2E-05 | E2E-05 |
  * | diff（行内容の保持） | UD-01～03 | UD-08 | UD-09 |
@@ -765,6 +767,375 @@ test("[E2E-09] sjis_grep の files_only と context/limit/offset によるペー
 
     // 全件表示のときは showing を含まない
     assert.match(await call(7, {}), /Found 3 matches:\n/);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-10] patch モード: @@ は V4A どおり省略可能で、適用不能な構造は原因を示してエラーになる", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    // (a) @@ 無しの hunk は V4A 仕様どおり有効（change 行で hunk を開始できる）
+    const f1 = join(dir, "no-atat.txt");
+    writeFileSync(f1, "aaaa\nbbbb\n");
+    const patch1 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f1}\n` +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res1 = await request(2, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch1 },
+    });
+    assert.match(res1.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f1, "utf-8"), "aaaa\nBBBB\n");
+
+    // (b) 後続の空白が無い裸の @@ 行も hunk 開始として扱われる
+    const f2 = join(dir, "bare-atat.txt");
+    writeFileSync(f2, "aaaa\nbbbb\n");
+    const patch2 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f2}\n` +
+      "@@\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res2 = await request(3, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch2 },
+    });
+    assert.match(res2.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f2, "utf-8"), "aaaa\nBBBB\n");
+
+    // (c) 連続する @@ 行（V4A の文脈チェーン）は同一 hunk として扱われる
+    const f3 = join(dir, "atat-chain.txt");
+    writeFileSync(f3, "aaaa\nbbbb\n");
+    const patch3 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f3}\n` +
+      "@@ aaaa\n" +
+      "@@ bbbb\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res3 = await request(4, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch3 },
+    });
+    assert.match(res3.result.content[0].text, /Successfully patched .* \(1 edit\)/);
+    assert.equal(readFileSync(f3, "utf-8"), "aaaa\nBBBB\n");
+
+    // (d) パッチの外（*** Update File: より前）の change 行は原因と対処を示してエラー
+    const patch4 =
+      "*** Begin Patch\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res4 = await request(5, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch4 },
+    });
+    assert.equal(res4.result.isError, true);
+    assert.match(res4.result.content[0].text, /outside of any \*\*\* Update File: section/);
+    assert.match(res4.result.content[0].text, /must come after/);
+
+    // (e) @@ 行が *** Update File: より前にあるパッチはエラー
+    const patch5 =
+      "*** Begin Patch\n" +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res5 = await request(6, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch5 },
+    });
+    assert.equal(res5.result.isError, true);
+    assert.match(res5.result.content[0].text, /@@ hunk header before any \*\*\* Update File: line/);
+
+    // (f) 未対応ディレクティブ（*** Add File:）はエラーになり、その内容が直前の hunk に混入しない
+    const f6 = join(dir, "with-add.txt");
+    writeFileSync(f6, "aaaa\nbbbb\n");
+    const patch6 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f6}\n` +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** Add File: new.txt\n" +
+      "+INSERTED\n" +
+      "*** End Patch\n";
+    const res6 = await request(7, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch6 },
+    });
+    assert.equal(res6.result.isError, true);
+    assert.match(res6.result.content[0].text, /unsupported patch directive/);
+    assert.equal(readFileSync(f6, "utf-8"), "aaaa\nbbbb\n");
+    assert.ok(!existsSync(join(dir, "new.txt")));
+
+    // (g) ファイルパスが空の *** Update File: はエラー
+    const patch7 =
+      "*** Begin Patch\n" +
+      "*** Update File: \n" +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res7 = await request(8, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch7 },
+    });
+    assert.equal(res7.result.isError, true);
+    assert.match(res7.result.content[0].text, /empty file path/);
+
+    // (h) hunk の無い *** Update File: はエラー（黙ってスキップされない）
+    const f8 = join(dir, "no-hunks.txt");
+    writeFileSync(f8, "aaaa\nbbbb\n");
+    const patch8 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f8}\n` +
+      "*** End Patch\n";
+    const res8 = await request(9, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch8 },
+    });
+    assert.equal(res8.result.isError, true);
+    assert.match(res8.result.content[0].text, /no hunks found/);
+    assert.equal(readFileSync(f8, "utf-8"), "aaaa\nbbbb\n");
+
+    // (i) @@ 省略の hunk でも行末コードは文字データのまま扱われる（CRLF パッチ → CRLF ファイル）
+    const f9 = join(dir, "no-atat-crlf.txt");
+    writeFileSync(f9, iconv.encode("名前 = 太郎\r\n年齢 = 30\r\n", "shift-jis"));
+    const patch9 =
+      "*** Begin Patch\r\n" +
+      `*** Update File: ${f9}\r\n` +
+      " 名前 = 太郎\r\n" +
+      "-年齢 = 30\r\n" +
+      "+年齢 = 31\r\n" +
+      "*** End Patch\r\n";
+    const res9 = await request(10, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch9 },
+    });
+    assert.match(res9.result.content[0].text, /Successfully patched/);
+    assert.equal(
+      iconv.decode(readFileSync(f9), "shift-jis"),
+      "名前 = 太郎\r\n年齢 = 31\r\n",
+    );
+
+    // (j) bare CR: @@ 省略の hunk でもパッチ内の \r は行区切りかつ文字データとして扱われる
+    //     （E2E-08(b) の @@ 付きパッチと同一構造・同一結果になることの対照試験）
+    const f10 = join(dir, "no-atat-cr.txt");
+    writeFileSync(f10, "aaaa\rbbbb\rdddd\r");
+    const patch10 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f10}\n` +
+      " aaaa\r" +
+      "-bbbb\r" +
+      "+BBBB\r" +
+      " dddd\r" +
+      "*** End Patch\n";
+    const res10 = await request(11, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch10 },
+    });
+    assert.match(res10.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f10, "utf-8"), "aaaa\rBBBB\rdddd\r");
+
+    // (k) *** Begin Patch を忘れたパッチは Begin 忘れをヒントに示してエラー
+    const f11 = join(dir, "no-begin.txt");
+    writeFileSync(f11, "aaaa\nbbbb\n");
+    const patch11 =
+      `*** Update File: ${f11}\n` +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res11 = await request(12, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch11 },
+    });
+    assert.equal(res11.result.isError, true);
+    assert.match(res11.result.content[0].text, /No valid patches found/);
+    assert.match(res11.result.content[0].text, /must start with a '\*\*\* Begin Patch' line/);
+    assert.equal(readFileSync(f11, "utf-8"), "aaaa\nbbbb\n");
+
+    // (l) 空のパッチ（Begin + End のみ）は Update File セクション無しをヒントに示す
+    const patch12 = "*** Begin Patch\n*** End Patch\n";
+    const res12 = await request(13, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch12 },
+    });
+    assert.equal(res12.result.isError, true);
+    assert.match(res12.result.content[0].text, /contains no '\*\*\* Update File:' sections/);
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-11] sjis_patch/sjis_write は引数漏れを 'undefined' 文字列として処理せずエラーになる", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    // (a) replace モードで oldText/newText を省略しても "undefined" 文字列で置換しない
+    const f1 = join(dir, "undef.txt");
+    writeFileSync(f1, "x = undefined;\n");
+    const res1 = await request(2, "tools/call", {
+      name: "sjis_patch",
+      arguments: { path: f1 },
+    });
+    assert.equal(res1.result.isError, true);
+    assert.match(res1.result.content[0].text, /oldText and newText are required/);
+    assert.equal(readFileSync(f1, "utf-8"), "x = undefined;\n");
+
+    // (b) replace モードに patch パラメータを渡すとエラー（mode 指定漏れの取りこぼし）
+    const res2 = await request(3, "tools/call", {
+      name: "sjis_patch",
+      arguments: { path: f1, patch: "*** Begin Patch\n" },
+    });
+    assert.equal(res2.result.isError, true);
+    assert.match(res2.result.content[0].text, /only valid when mode='patch'/);
+
+    // (c) 不明な mode はエラー（replace モードとして黙って処理しない）
+    const res3 = await request(4, "tools/call", {
+      name: "sjis_patch",
+      arguments: { path: f1, mode: "Patch", oldText: "x = ", newText: "y = " },
+    });
+    assert.equal(res3.result.isError, true);
+    assert.match(res3.result.content[0].text, /mode must be 'replace' or 'patch'/);
+
+    // (d) patch モードで args.path にパッチ対象と同じファイルを指定してもデッドロックしない
+    const f4 = join(dir, "same-path.txt");
+    writeFileSync(f4, "aaaa\nbbbb\n");
+    const patch4 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f4}\n` +
+      "@@ hoge\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "*** End Patch\n";
+    const res4 = await request(5, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", path: f4, patch: patch4 },
+    });
+    assert.match(res4.result.content[0].text, /Successfully patched/);
+    assert.equal(readFileSync(f4, "utf-8"), "aaaa\nBBBB\n");
+
+    // (e) sjis_write で content を省略しても "undefined" 文字列を書き込まない
+    const f5 = join(dir, "keep.txt");
+    writeFileSync(f5, "keep\n");
+    const res5 = await request(6, "tools/call", {
+      name: "sjis_write",
+      arguments: { path: f5 },
+    });
+    assert.equal(res5.result.isError, true);
+    assert.match(res5.result.content[0].text, /content parameter is required/);
+    assert.equal(readFileSync(f5, "utf-8"), "keep\n");
+  } finally {
+    child.kill();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("[E2E-12] patch モード: 1 パッチに複数の Update File セクションと複数 hunk を持てる（V4A 仕様どおり）", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sjis-e2e-"));
+  const { child, request, notify } = startServer();
+  try {
+    const init = await request(1, "initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: "test", version: "1.0" },
+    });
+    assert.ok(init.result.serverInfo.name);
+    notify("notifications/initialized");
+
+    // (a) 異なる 2 ファイルへの Update File を 1 パッチで適用する
+    const f1 = join(dir, "a.txt");
+    const f2 = join(dir, "b.txt");
+    writeFileSync(f1, "aaaa\nbbbb\n");
+    writeFileSync(f2, "cccc\ndddd\n");
+    const patch1 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f1}\n` +
+      "@@ aaaa\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      `*** Update File: ${f2}\n` +
+      "@@ cccc\n" +
+      "-dddd\n" +
+      "+DDDD\n" +
+      "*** End Patch\n";
+    const res1 = await request(2, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch1 },
+    });
+    const text1 = res1.result.content[0].text;
+    assert.equal((text1.match(/Successfully patched/g) ?? []).length, 2);
+    assert.equal(readFileSync(f1, "utf-8"), "aaaa\nBBBB\n");
+    assert.equal(readFileSync(f2, "utf-8"), "cccc\nDDDD\n");
+
+    // (b) 同一ファイルへの 2 つの Update File セクションは記述順に適用される
+    //     （2 セクション目は 1 セクション目の適用結果に対してマッチする）
+    const f3 = join(dir, "c.txt");
+    writeFileSync(f3, "aaaa\nbbbb\ncccc\n");
+    const patch2 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f3}\n` +
+      "@@ aaaa\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      `*** Update File: ${f3}\n` +
+      "@@ BBBB\n" +
+      "-cccc\n" +
+      "+CCCC\n" +
+      "*** End Patch\n";
+    const res2 = await request(3, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch2 },
+    });
+    const text2 = res2.result.content[0].text;
+    assert.equal((text2.match(/Successfully patched/g) ?? []).length, 2);
+    assert.equal(readFileSync(f3, "utf-8"), "aaaa\nBBBB\nCCCC\n");
+
+    // (c) 1 つの Update File セクション内の複数 hunk（@@ 区切り）も記述順に適用される
+    const f4 = join(dir, "d.txt");
+    writeFileSync(f4, "aaaa\nbbbb\ncccc\ndddd\n");
+    const patch3 =
+      "*** Begin Patch\n" +
+      `*** Update File: ${f4}\n` +
+      "@@ aaaa\n" +
+      "-bbbb\n" +
+      "+BBBB\n" +
+      "@@ cccc\n" +
+      "-dddd\n" +
+      "+DDDD\n" +
+      "*** End Patch\n";
+    const res3 = await request(4, "tools/call", {
+      name: "sjis_patch",
+      arguments: { mode: "patch", patch: patch3 },
+    });
+    assert.match(res3.result.content[0].text, /Successfully patched .* \(2 edits\)/);
+    assert.equal(readFileSync(f4, "utf-8"), "aaaa\nBBBB\ncccc\nDDDD\n");
   } finally {
     child.kill();
     rmSync(dir, { recursive: true, force: true });
